@@ -1,0 +1,14 @@
+node_modules/
+dist/
+auth_state/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.local
+.claude/settings.local.json
+coverage/
+.vitest-cache/
+*.log
+RESUME_NOTES.md

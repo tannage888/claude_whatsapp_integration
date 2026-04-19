@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/seang/.claude/**)",
+      "Read(//c/Users/seang/OneDrive/Documents/ClaudeWork/projects/kit/**)",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(npm test *)",
+      "Bash(git init *)"
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+blockers: []
+created: '2026-04-19'
+display_name: Claude Whatsapp Integration
+has_context: true
+last_reviewed: '2026-04-19'
+name: claude_whatsapp_integration
+next_actions: []
+status: active
+tags: []
+type: app
