@@ -4,9 +4,26 @@
       "Read(//c/Users/seang/.claude/**)",
       "Read(//c/Users/seang/OneDrive/Documents/ClaudeWork/projects/kit/**)",
       "Bash(npm install *)",
-      "Bash(npx tsc *)",
+      "Bash(npm test)",
       "Bash(npm test *)",
-      "Bash(git init *)"
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(npx vitest *)",
+      "Bash(node *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git status)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git restore *)",
+      "Bash(git checkout *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(\"C:/Users/seang/.claude/plugins/cache/claude-plugins-official/ralph-loop/1.0.0/scripts/setup-ralph-loop.sh\" *)",
+      "Bash(C:/Users/seang/.claude/plugins/cache/claude-plugins-official/ralph-loop/1.0.0/scripts/setup-ralph-loop.sh *)",
+      "Skill(update-config)",
+      "Skill(update-config:*)"
     ]
   }
 }

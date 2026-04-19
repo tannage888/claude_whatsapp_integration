@@ -8,6 +8,7 @@ auth_state/
 .env
 .env.local
 .claude/settings.local.json
+.claude/ralph-loop.local.md
 coverage/
 .vitest-cache/
 *.log

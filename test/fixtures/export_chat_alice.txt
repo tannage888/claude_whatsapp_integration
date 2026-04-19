@@ -1,0 +1,7 @@
+[12/04/2026, 09:01:14] Alice Smith: are you free Thursday?
+[12/04/2026, 09:05:32] Me: Yes, sounds good!
+[12/04/2026, 09:06:00] Alice Smith: Great, let's meet at 10am
+[13/04/2026, 14:22:05] Alice Smith: Don't forget the meeting tomorrow
+[13/04/2026, 14:23:10] Me: Thanks for the reminder
+[14/04/2026, 08:00:01] Alice Smith: Good morning!
+[14/04/2026, 08:00:02] Me: Morning! Ready for the call?
