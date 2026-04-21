@@ -1,6 +1,8 @@
 # Ralph Loop Prompt — Claude WhatsApp Integration
 
-You are building a standalone TypeScript module that integrates coding projects with WhatsApp via Baileys. The full specification, including all functional requirements, REST endpoints, data model, JSON schemas, and the 13-phase implementation plan, is in `docs/claude_whatsapp_integration.md`. **Read it on every iteration before doing anything else.**
+You are building a standalone TypeScript module that integrates coding projects with WhatsApp via Baileys. The full specification, including all functional requirements, REST endpoints, data model, JSON schemas, and the 15-phase implementation plan, is in `docs/claude_whatsapp_integration.md`. **Read it on every iteration before doing anything else.**
+
+**Current state as of this prompt:** Phases 0-12 are already complete with 102 tests passing. Your job is to build Phases 13 and 14. Do not modify or re-run Phases 0-12 unless their tests have regressed.
 
 You are running inside the ralph-loop plugin. The same prompt is fed back to you between iterations. All your prior work persists on disk. Use that.
 
@@ -19,7 +21,7 @@ You are running inside the ralph-loop plugin. The same prompt is fed back to you
    - What you did this iteration
    - Test status (green/red, with failing test names if red)
    - What the next iteration should focus on
-8. **Check completion**: only emit the completion promise when ALL phases (0-12) have green tests AND the e2e spec from Phase 12 passes.
+8. **Check completion** against the 95%-certainty criteria below. Emit the completion promise only when those are met.
 
 ---
 
@@ -49,7 +51,7 @@ For each phase, the spec (§8) lists exact sub-tasks and required tests. Follow 
 
 ## Critical rules
 
-- **Never emit `<promise>WHATSAPP_INTEGRATION_COMPLETE</promise>` until every phase (0-14) is done and all tests are green.** If you are stuck, document the blocker in `RESUME_NOTES.md` and continue trying. The completion promise is the only honest signal that the project is done — do not fake it.
+- **Do not emit `<promise>WHATSAPP_INTEGRATION_COMPLETE</promise>` until you have ≥95% certainty that Phases 13 and 14 work as specified** (see "Stop conditions" below for the checklist). The completion promise is an honest signal, not an escape hatch — do not fake it to end the loop.
 - **Stay strictly on the current phase.** If a previous phase's tests are red, fix them first before advancing. If a future phase looks easy, ignore it — phase order matters because later phases depend on earlier ones.
 - **Tests are the contract.** Every phase's "Done when" criterion is a green test suite. If you've written code but not tests, you are not done with the phase. If you have tests but they don't actually exercise the requirement, you are not done with the phase.
 - **Use the kit gateway as a reference.** [`C:/Users/seang/OneDrive/Documents/ClaudeWork/projects/kit/gateway/src/`](C:/Users/seang/OneDrive/Documents/ClaudeWork/projects/kit/gateway/src/) has working code for `whatsapp.ts`, `message-store.ts`, and `history-fetcher.ts`. Port from it where the spec says to. **Remove the `@g.us` group filter** when porting `whatsapp.ts` — this module reads groups.
@@ -59,17 +61,32 @@ For each phase, the spec (§8) lists exact sub-tasks and required tests. Follow 
 
 ---
 
-## Stop conditions
+## Stop conditions (≥95% certainty)
 
-You may stop the loop in only ONE way: emit `<promise>WHATSAPP_INTEGRATION_COMPLETE</promise>` when, and only when, all of the following are true:
+Emit `<promise>WHATSAPP_INTEGRATION_COMPLETE</promise>` when you have **≥95% certainty** that Phases 13 and 14 work as specified. Use this concrete checklist — each box is worth roughly equal weight, and you need all of them checked honestly:
 
-- `npm test` passes with zero failures.
-- `npx tsc --noEmit` passes with zero errors.
-- The Phase 12 e2e spec exists and passes.
-- `RESUME_NOTES.md` documents that all 15 phases (0-14) are complete.
-- Phase 13 (`contact-context-scraper.ts`) and Phase 14 (`zip-export-importer.ts`) have passing tests.
+**Hard gates (non-negotiable — missing any of these means <95%):**
+1. ☐ `npm test` passes with zero failures (including new Phase 13 + 14 tests).
+2. ☐ `npx tsc --noEmit` passes with zero errors.
+3. ☐ Phase 12 e2e spec still passes (no regressions in the existing 102 tests).
+4. ☐ `src/services/contact-context-scraper.ts` exists with implementation + a unit test file that covers: identifier resolution, empty-membership refresh+retry path, pagination termination, `MessageStore` buffering, and response shape.
+5. ☐ `src/services/zip-export-importer.ts` exists with implementation + a unit test file that covers: extracting `.txt` from a fixture ZIP, dedup against `MessageStore`, `chatJid` inference from filename, and the "no `.txt` in ZIP" error path.
+6. ☐ `POST /api/contacts/{identifier}/scrape-context` and `POST /api/import/zip-export` are both wired in `src/routes/api.ts` with supertest integration tests.
+7. ☐ Auto-detection listener for self-sent WhatsApp export ZIPs is wired in `src/services/whatsapp.ts` (or `src/index.ts`) and has at least one test: fromMe + ZIP mime + matching filename → importer invoked; fromMe=false OR non-ZIP mime → importer NOT invoked; `DISABLE_AUTO_ZIP_IMPORT=true` → listener inactive.
+8. ☐ CLI subcommands `wa contacts scrape-context <id>` and `wa import-zip <path>` are added with snapshot tests.
 
-If you are blocked — a test you cannot make pass, a Baileys API that doesn't behave as the spec assumed, an unresolvable type error — document it precisely in `RESUME_NOTES.md` under a `## Blockers` section and continue iterating on other phases or alternative approaches. Do NOT emit the completion promise to escape a blocker.
+**Soft gates (add confidence — aim to check at least 2):**
+9. ☐ You have manually traced the control flow of each new service end-to-end against the spec, reading the code line by line, and found no obvious bugs.
+10. ☐ You have verified that `adm-zip` is pinned in `package.json`, installs cleanly, and is actually used by the code (not just imported).
+11. ☐ Edge cases you *chose not to handle* are explicitly documented in `RESUME_NOTES.md` under a `## Known limitations` section (e.g. "password-protected ZIPs are not supported").
+12. ☐ You wrote down at least one scenario the automated tests *don't* cover, and it's either (a) something only manual verification can hit (e.g. real Baileys media download), or (b) explicitly out of scope.
+
+**Certainty self-assessment:** Before emitting the promise, write a `## Confidence` section in `RESUME_NOTES.md` that states:
+- Your self-assessed certainty percentage.
+- Which of the 12 boxes above are checked.
+- The specific scenarios you're *not* certain about and why you believe they're below the 5% residual-risk threshold.
+
+If your certainty is below 95%, keep iterating. If you're blocked, document the blocker under `## Blockers` in `RESUME_NOTES.md` and continue working on alternative approaches. Do NOT emit the completion promise to escape a blocker.
 
 ---
 
