@@ -212,6 +212,22 @@ Standard transcript JSON schema returned from all read endpoints:
 - `GET /api/gaps` — list all known gaps.
 - `POST /api/gaps/{id}/resolve` — manually mark a gap as resolved (e.g. after phone-export import).
 
+### FR-12: Contact context scrape
+
+- `POST /api/contacts/{identifier}/scrape-context` — fetches complete chat history for all chats a given contact belongs to.
+- Accepts `{ "maxMessagesPerChat": 500, "since": "<ISO timestamp>" }` (both optional).
+- First resolves the contact to a JID, then queries the membership cache (triggering a refresh if empty), then issues paginated `fetchMessageHistory` calls for each chat.
+- Returns per-chat backfill counts and a total.
+- CLI: `wa contacts scrape-context <identifier>`.
+
+### FR-13: WhatsApp ZIP export ingestion
+
+- Accepts the ZIP file produced by WhatsApp's built-in "Export Chat" feature (Android/iOS), which contains a `_chat.txt` transcript and optional media attachments.
+- **Manual mode:** `POST /api/import/zip-export` (multipart upload, optional `chatJid` field). Extracts the ZIP, locates the `.txt` file, and delegates to the existing phone-export parser.
+- **Automatic mode:** The daemon listens for incoming documents from itself (`fromMe=true`) with a ZIP mime type and a filename matching `WhatsApp Chat*.zip`. On detection, downloads the attachment via Baileys and runs it through the ZIP importer automatically. Disable with `DISABLE_AUTO_ZIP_IMPORT=true`.
+- Both modes return `{ "imported", "duplicates", "gapsResolved", "textFile", "attachmentsIgnored" }`.
+- CLI: `wa import-zip <path> [--jid <jid>]`.
+
 ### FR-10: Phone-export importer
 
 - `POST /api/import/phone-export` (multipart upload) accepts a WhatsApp `Export Chat` `.txt` file.
@@ -341,6 +357,7 @@ CREATE TABLE gaps (
 | GET | `/api/chats/{jid}/messages` | Read messages (modes: `since_last_review` (default), `full`, `from`/`to`) |
 | POST | `/api/chats/{jid}/ack` | Advance watermark |
 | GET | `/api/contacts/{identifier}/chats` | Which chats a contact is on |
+| POST | `/api/contacts/{identifier}/scrape-context` | Fetch full history for all chats a contact belongs to |
 | POST | `/api/contacts/refresh` | Refresh group-membership cache |
 | GET | `/api/no-read` | List no-read entries |
 | POST | `/api/no-read` | Add to no-read list |
@@ -349,6 +366,7 @@ CREATE TABLE gaps (
 | GET | `/api/gaps` | List known gaps |
 | POST | `/api/gaps/{id}/resolve` | Mark gap resolved |
 | POST | `/api/import/phone-export` | Import phone-side `Export Chat` .txt |
+| POST | `/api/import/zip-export` | Import WhatsApp export ZIP (containing .txt + optional media) |
 
 ---
 
@@ -542,23 +560,129 @@ The Ralph-loop plugin runs Claude in a `while-true` against a single prompt unti
   7. Imports a phone-export fixture, asserts gap resolved.
 - **Done when:** This single spec passes.
 
+### Phase 13: Contact context scraper (FR-12)
+
+New service `src/services/contact-context-scraper.ts` that, given a contact identifier, fetches complete message history across **all** chats they appear in.
+
+**Endpoint:** `POST /api/contacts/{identifier}/scrape-context`
+
+Request body (all fields optional):
+```json
+{ "maxMessagesPerChat": 500, "since": "2026-01-01T00:00:00Z" }
+```
+
+Response:
+```json
+{
+  "contactJid": "447700900123@s.whatsapp.net",
+  "chats": [
+    { "jid": "120363..@g.us", "displayName": "Family Group", "type": "group", "messagesBackfilled": 42 },
+    { "jid": "447700900123@s.whatsapp.net", "displayName": "Alice Smith", "type": "individual", "messagesBackfilled": 7 }
+  ],
+  "totalMessagesBackfilled": 49
+}
+```
+
+**Service logic:**
+1. Resolve identifier → JID via `jid.ts`.
+2. Call `MembershipService.getChatsForContact(identifier)` to get all chats.
+3. If the membership result is empty, call `MembershipService.refresh()` first then retry (contact might not have sent a group message yet in this session).
+4. For each chat, call `socket.fetchMessageHistory(jid, cursor, count)` paginated until either: (a) messages prior to `since` are reached, or (b) `maxMessagesPerChat` is reached.
+5. Buffer fetched messages into `MessageStore`.
+6. Return per-chat stats.
+
+**CLI:**
+```bash
+wa contacts scrape-context +447700900123
+wa contacts scrape-context +447700900123 --since 2026-01-01 --max 1000
+```
+
+**Tests:**
+- Mock membership service returning two chats; mock socket `fetchMessageHistory`; assert both chats are fetched and stats returned correctly.
+- Zero chats returned from membership → triggers refresh → retry path exercised.
+- `since` filter stops pagination at the right cursor.
+- **Done when:** Tests pass.
+
+### Phase 14: ZIP export ingestion (FR-13)
+
+Extends the phone-export importer to handle WhatsApp's exported ZIP file format. WhatsApp's "Export Chat" on Android/iOS produces a `.zip` containing a `_chat.txt` (or `WhatsApp Chat with X.txt`) and optionally attached media files.
+
+**Two ingestion modes:**
+
+#### 14a — Manual upload endpoint
+
+`POST /api/import/zip-export` (multipart, field name `file`, optional field `chatJid`)
+
+The endpoint:
+1. Receives the ZIP buffer via multer.
+2. Extracts to a temp directory using `adm-zip` (pure-JS, Windows-safe).
+3. Finds the first `.txt` file in the ZIP (the chat transcript).
+4. If `chatJid` not provided, attempts to infer from the filename (`WhatsApp Chat with X.txt` → lookup in `StateDb.chats`).
+5. Calls existing `importPhoneExport(text, chatJid, store, db)`.
+6. Cleans up temp directory.
+7. Returns:
+```json
+{ "imported": 432, "duplicates": 1207, "gapsResolved": [3, 7], "textFile": "WhatsApp Chat with Alice.txt", "attachmentsIgnored": 12 }
+```
+
+#### 14b — Automatic detection of self-sent ZIPs
+
+In `WhatsAppConnection`, on `messages.upsert`, detect messages where:
+- `fromMe === true`
+- `message.documentMessage` (or `message.documentWithCaptionMessage`) is present
+- `mimetype` is `application/zip` or `application/x-zip-compressed`
+- `fileName` matches `/whatsapp chat/i`
+
+When detected:
+1. Download the attachment via Baileys `downloadMediaMessage(msg)`.
+2. Pass the buffer to the ZIP importer service.
+3. Log the import result (no REST response needed — it's background processing).
+4. Emit a `zip-import:complete` event so callers can hook in.
+
+Automatic detection can be disabled via `DISABLE_AUTO_ZIP_IMPORT=true` env var (default: enabled).
+
+**New dependency:** `adm-zip` — add to `package.json`.
+
+**New service:** `src/services/zip-export-importer.ts`
+
+```ts
+export async function importZipExport(
+  zipBuffer: Buffer,
+  chatJid: string | undefined,
+  store: MessageStore,
+  db: StateDb
+): Promise<ZipImportResult>
+```
+
+**CLI:**
+```bash
+wa import-zip ./WhatsApp_Chat_with_Alice.zip
+wa import-zip ./export.zip --jid 447700900123@s.whatsapp.net
+```
+
+**Tests:**
+- Build a minimal fixture ZIP in the test containing a known `.txt`; assert import result matches expected counts.
+- Re-import same ZIP → 100% duplicates.
+- ZIP with no `.txt` file → error response.
+- Auto-detect: inject a simulated self-sent document message with ZIP mime type → assert importer called.
+- `DISABLE_AUTO_ZIP_IMPORT=true` → auto-detect suppressed.
+- **Done when:** Tests pass.
+
 ### Completion promise
 
-When all phase test suites pass and Phase 12's e2e spec passes, the agent emits:
+When all phase test suites pass (including Phases 13 and 14) and Phase 12's e2e spec passes, the agent emits:
 
 ```
 <promise>WHATSAPP_INTEGRATION_COMPLETE</promise>
 ```
 
-### Ralph-loop invocation (planned)
+### Ralph-loop invocation
 
 ```bash
 /ralph-loop "$(cat docs/ralph-prompt.md)" \
   --completion-promise "WHATSAPP_INTEGRATION_COMPLETE" \
   --max-iterations 60
 ```
-
-A separate `docs/ralph-prompt.md` file (to be created in Phase 0) will hold the operative prompt with these phase definitions, a "start each iteration by reading existing source and test output" preamble, and explicit "do not emit the completion promise until every `npm test` is green" guard.
 
 ---
 

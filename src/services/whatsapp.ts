@@ -83,27 +83,34 @@ export class WhatsAppConnection extends EventEmitter {
       this.store.buffer(messages);
     });
 
-    if (usePairingCode) {
-      try {
-        const digits = config.WHATSAPP_PHONE!.replace(/^\+/, "");
-        this.pairingCode = await this.socket.requestPairingCode(digits);
-        this.setStatus("qr_ready");
-        this.emit("qr:pairing", this.pairingCode);
-      } catch {
-        // Fall back to QR code
-        this.socket.ev.on("connection.update", (update) => {
-          if (update.qr) this.handleQr(update.qr);
-        });
-      }
-    }
+    // Track whether we've already requested a pairing code for this session
+    let pairingRequested = false;
 
     this.socket.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update;
+
+      // When WA sends a QR, the connection is ready for pairing code request
+      if (qr && usePairingCode && !pairingRequested) {
+        pairingRequested = true;
+        const digits = config.WHATSAPP_PHONE!.replace(/\D/g, "");
+        this.socket!.requestPairingCode(digits)
+          .then((code) => {
+            this.pairingCode = code;
+            this.setStatus("qr_ready");
+            this.emit("qr:pairing", code);
+          })
+          .catch((err) => {
+            console.error("Pairing code request failed, showing QR instead:", err);
+            this.handleQr(qr);
+          });
+        return;
+      }
 
       if (qr && !usePairingCode) this.handleQr(qr);
 
       if (connection === "close") {
         const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        console.log(`Connection closed — reason code: ${reason}`);
         const loggedOut = reason === DisconnectReason.loggedOut;
 
         if (loggedOut) {

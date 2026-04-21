@@ -23,7 +23,7 @@ You are running inside the ralph-loop plugin. The same prompt is fed back to you
 
 ---
 
-## The 13 phases (summary — full detail in spec §8)
+## The 15 phases (summary — full detail in spec §8)
 
 | Phase | Name | Done when |
 |---|---|---|
@@ -40,6 +40,8 @@ You are running inside the ralph-loop plugin. The same prompt is fed back to you
 | 10 | CLI | Each subcommand maps to REST call; snapshot tests pass |
 | 11 | Production hardening | Bearer token middleware, 127.0.0.1 bind, graceful shutdown, README service-install sections |
 | 12 | End-to-end smoke test | Single Vitest spec exercising every major feature |
+| 13 | Contact context scraper | `POST /api/contacts/{identifier}/scrape-context` fetches full history for all chats contact belongs to; `wa contacts scrape-context` CLI; tests pass |
+| 14 | ZIP export ingestion | Manual `POST /api/import/zip-export` endpoint + automatic detection of self-sent WhatsApp export ZIPs; `wa import-zip` CLI; tests pass |
 
 For each phase, the spec (§8) lists exact sub-tasks and required tests. Follow them precisely.
 
@@ -47,7 +49,7 @@ For each phase, the spec (§8) lists exact sub-tasks and required tests. Follow 
 
 ## Critical rules
 
-- **Never emit `<promise>WHATSAPP_INTEGRATION_COMPLETE</promise>` until every phase is done and all tests are green.** If you are stuck, document the blocker in `RESUME_NOTES.md` and continue trying. The completion promise is the only honest signal that the project is done — do not fake it.
+- **Never emit `<promise>WHATSAPP_INTEGRATION_COMPLETE</promise>` until every phase (0-14) is done and all tests are green.** If you are stuck, document the blocker in `RESUME_NOTES.md` and continue trying. The completion promise is the only honest signal that the project is done — do not fake it.
 - **Stay strictly on the current phase.** If a previous phase's tests are red, fix them first before advancing. If a future phase looks easy, ignore it — phase order matters because later phases depend on earlier ones.
 - **Tests are the contract.** Every phase's "Done when" criterion is a green test suite. If you've written code but not tests, you are not done with the phase. If you have tests but they don't actually exercise the requirement, you are not done with the phase.
 - **Use the kit gateway as a reference.** [`C:/Users/seang/OneDrive/Documents/ClaudeWork/projects/kit/gateway/src/`](C:/Users/seang/OneDrive/Documents/ClaudeWork/projects/kit/gateway/src/) has working code for `whatsapp.ts`, `message-store.ts`, and `history-fetcher.ts`. Port from it where the spec says to. **Remove the `@g.us` group filter** when porting `whatsapp.ts` — this module reads groups.
@@ -64,7 +66,8 @@ You may stop the loop in only ONE way: emit `<promise>WHATSAPP_INTEGRATION_COMPL
 - `npm test` passes with zero failures.
 - `npx tsc --noEmit` passes with zero errors.
 - The Phase 12 e2e spec exists and passes.
-- `RESUME_NOTES.md` documents that all 13 phases are complete.
+- `RESUME_NOTES.md` documents that all 15 phases (0-14) are complete.
+- Phase 13 (`contact-context-scraper.ts`) and Phase 14 (`zip-export-importer.ts`) have passing tests.
 
 If you are blocked — a test you cannot make pass, a Baileys API that doesn't behave as the spec assumed, an unresolvable type error — document it precisely in `RESUME_NOTES.md` under a `## Blockers` section and continue iterating on other phases or alternative approaches. Do NOT emit the completion promise to escape a blocker.
 

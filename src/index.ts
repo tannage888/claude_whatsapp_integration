@@ -1,14 +1,45 @@
 import express from "express";
 import { config } from "./config.js";
 import { createApiRouter } from "./routes/api.js";
-import type { ConnectionStatus } from "./types.js";
+import { WhatsAppConnection } from "./services/whatsapp.js";
+import { StateDb } from "./services/state-db.js";
+import { NoReadService } from "./services/no-read.js";
+import { MembershipService } from "./services/membership.js";
 
 const VERSION = "0.1.0";
 
 async function main(): Promise<void> {
   const startedAt = Date.now();
 
-  let connectionStatus: ConnectionStatus = "disconnected";
+  // ── Initialise services ────────────────────────────────────
+
+  const db = new StateDb(config.STATE_DB_PATH);
+  const wa = new WhatsAppConnection(config.MESSAGE_STORE_PATH);
+  const noRead = new NoReadService(db, wa.store);
+  const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS);
+
+  // Wire membership tracking into incoming group messages
+  wa.on("message:received", (msg: any) => {
+    if (msg.remoteJid?.endsWith("@g.us") && msg.participantJid) {
+      membership.recordMember(msg.remoteJid, msg.participantJid, null);
+    }
+  });
+
+  // ── Start WhatsApp connection ──────────────────────────────
+
+  wa.on("qr:pairing", (code: string) => {
+    console.log(`\n📱 WhatsApp pairing code: ${code}\n`);
+    console.log("   On your phone: Settings → Linked Devices → Link with phone number");
+    console.log("   Enter the code above.\n");
+  });
+
+  wa.on("connection:status", (status: string) => {
+    console.log(`📡 WhatsApp status: ${status}`);
+  });
+
+  await wa.connect();
+
+  // ── REST API ───────────────────────────────────────────────
 
   const app = express();
   app.use(express.json());
@@ -16,7 +47,12 @@ async function main(): Promise<void> {
   const apiRouter = createApiRouter({
     startedAt,
     version: VERSION,
-    getConnectionStatus: () => connectionStatus,
+    getConnectionStatus: () => wa.getStatus(),
+    whatsapp: wa,
+    db,
+    noRead,
+    membership,
+    authStatePath: config.AUTH_STATE_PATH,
   });
   app.use("/api", apiRouter);
 
@@ -24,13 +60,17 @@ async function main(): Promise<void> {
 
   app.listen(config.PORT, config.BIND_ADDRESS, () => {
     console.log(
-      `WhatsApp gateway v${VERSION} listening on http://${config.BIND_ADDRESS}:${config.PORT}`
+      `\nWhatsApp gateway v${VERSION} listening on http://${config.BIND_ADDRESS}:${config.PORT}`
     );
     console.log(`Status: GET /api/status`);
   });
 
-  const shutdown = (signal: string): void => {
+  // ── Graceful shutdown ──────────────────────────────────────
+
+  const shutdown = async (signal: string): Promise<void> => {
     console.log(`${signal} received — shutting down`);
+    membership.stopScheduledRefresh();
+    await wa.disconnect();
     process.exit(0);
   };
 
