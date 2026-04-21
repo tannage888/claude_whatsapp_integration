@@ -143,6 +143,9 @@ export class WhatsAppConnection extends EventEmitter {
       if (type !== "notify") return;
 
       for (const msg of messages) {
+        // Emit raw proto for hooks that need more than the text-body parser (e.g. ZIP auto-detect)
+        this.emit("message:raw", msg);
+
         const parsed = this.parseMessage(msg);
         if (!parsed) continue;
         this.emit(parsed.fromMe ? "message:sent" : "message:received", parsed);

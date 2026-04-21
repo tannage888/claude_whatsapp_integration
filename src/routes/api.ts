@@ -9,6 +9,8 @@ import type { ReadMode } from "../services/read.js";
 import { sendMessages, SendRequestSchema } from "../services/send.js";
 import type { MembershipService } from "../services/membership.js";
 import { importPhoneExport } from "../services/phone-export-importer.js";
+import { importZipExport, ZipImportError } from "../services/zip-export-importer.js";
+import type { ContactContextScraper } from "../services/contact-context-scraper.js";
 import multer from "multer";
 
 interface RouterDeps {
@@ -19,8 +21,14 @@ interface RouterDeps {
   db?: StateDb;
   noRead?: NoReadService;
   membership?: MembershipService;
+  contextScraper?: ContactContextScraper;
   authStatePath?: string;
 }
+
+const ScrapeContextBody = z.object({
+  maxMessagesPerChat: z.number().int().positive().max(5000).optional(),
+  since: z.string().datetime().optional(),
+});
 
 const AckBody = z.object({ watermark: z.string().datetime() });
 const NoReadAddBody = z.object({ identifier: z.string().min(1) });
@@ -144,6 +152,21 @@ export function createApiRouter(deps: RouterDeps): Router {
     return res.json(result);
   });
 
+  router.post("/contacts/:identifier/scrape-context", async (req, res) => {
+    const scraper = deps.contextScraper;
+    if (!scraper) return res.status(503).json({ error: "context_scraper_not_initialised" });
+
+    const parse = ScrapeContextBody.safeParse(req.body ?? {});
+    if (!parse.success) return res.status(400).json({ error: "invalid_body", details: parse.error.issues });
+
+    try {
+      const result = await scraper.scrape(req.params.identifier, parse.data);
+      return res.json(result);
+    } catch (e) {
+      return res.status(500).json({ error: "scrape_failed", message: (e as Error).message });
+    }
+  });
+
   // ── No-read list ──────────────────────────────────────────
 
   router.get("/no-read", (_req, res) => {
@@ -203,6 +226,29 @@ export function createApiRouter(deps: RouterDeps): Router {
     const text = file.buffer.toString("utf-8");
     const result = await importPhoneExport(text, chatJid, wa.store, db);
     return res.json(result);
+  });
+
+  // ── ZIP export import ─────────────────────────────────────
+
+  router.post("/import/zip-export", upload.single("file"), async (req, res) => {
+    const wa = deps.whatsapp;
+    const db = deps.db;
+    if (!wa || !db) return res.status(503).json({ error: "not_initialised" });
+
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "missing_file" });
+
+    const chatJid = (req.body?.chatJid as string) || (req.body?.jid as string) || (req.query.chatJid as string) || (req.query.jid as string) || undefined;
+
+    try {
+      const result = await importZipExport(file.buffer, chatJid, wa.store, db);
+      return res.json(result);
+    } catch (e) {
+      if (e instanceof ZipImportError) {
+        return res.status(400).json({ error: e.code, message: e.message });
+      }
+      return res.status(500).json({ error: "zip_import_failed", message: (e as Error).message });
+    }
   });
 
   return router;

@@ -5,6 +5,9 @@ import { WhatsAppConnection } from "./services/whatsapp.js";
 import { StateDb } from "./services/state-db.js";
 import { NoReadService } from "./services/no-read.js";
 import { MembershipService } from "./services/membership.js";
+import { ContactContextScraper } from "./services/contact-context-scraper.js";
+import { ZipAutoDetector } from "./services/zip-auto-detector.js";
+import type { proto } from "@whiskeysockets/baileys";
 
 const VERSION = "0.1.0";
 
@@ -17,6 +20,17 @@ async function main(): Promise<void> {
   const wa = new WhatsAppConnection(config.MESSAGE_STORE_PATH);
   const noRead = new NoReadService(db, wa.store);
   const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS);
+  const contextScraper = new ContactContextScraper(db, wa.store, membership, () => wa.getSocket());
+
+  const zipDetector = new ZipAutoDetector(wa.store, db, () => wa.getSocket(), {
+    disabled: process.env.DISABLE_AUTO_ZIP_IMPORT === "true",
+    onImport: (r) => {
+      console.log(`📦 ZIP auto-import: imported=${r.imported} duplicates=${r.duplicates} file="${r.textFile}"`);
+    },
+    onError: (e) => {
+      console.error(`📦 ZIP auto-import failed: ${e.message}`);
+    },
+  });
 
   // Wire membership tracking into incoming group messages
   wa.on("message:received", (msg: any) => {
@@ -24,6 +38,15 @@ async function main(): Promise<void> {
       membership.recordMember(msg.remoteJid, msg.participantJid, null);
     }
   });
+
+  // Wire ZIP auto-detection into every incoming raw message
+  if (!zipDetector.disabled) {
+    wa.on("message:raw", (raw: proto.IWebMessageInfo) => {
+      if (zipDetector.shouldProcess(raw)) {
+        zipDetector.handle(raw).catch(() => {});
+      }
+    });
+  }
 
   // ── Start WhatsApp connection ──────────────────────────────
 
@@ -52,6 +75,7 @@ async function main(): Promise<void> {
     db,
     noRead,
     membership,
+    contextScraper,
     authStatePath: config.AUTH_STATE_PATH,
   });
   app.use("/api", apiRouter);

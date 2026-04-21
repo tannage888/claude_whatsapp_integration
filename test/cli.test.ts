@@ -127,4 +127,58 @@ describe("Phase 10: CLI", () => {
     const { exitCode } = await cli(["unknowncmd"], port);
     expect(exitCode).toBe(1);
   });
+
+  it("wa contacts scrape-context posts body and returns scrape result", async () => {
+    let receivedBody: unknown;
+    const identifier = "+447700900123";
+    const encoded = encodeURIComponent(identifier);
+    const responseBody = {
+      contactJid: "447700900123@s.whatsapp.net",
+      chats: [{ jid: "120363..@g.us", displayName: "Group", type: "group", messagesBackfilled: 12 }],
+      totalMessagesBackfilled: 12,
+    };
+    ({ server } = await startMockServer({
+      [`POST /api/contacts/${encoded}/scrape-context`]: (req, res) => {
+        receivedBody = req.body;
+        res.json(responseBody);
+      },
+    }));
+    const { port } = server.address() as { port: number };
+    const { output, exitCode } = await cli(
+      ["contacts", "scrape-context", identifier, "--since", "2026-01-01T00:00:00.000Z", "--max", "100"],
+      port
+    );
+    expect(exitCode).toBe(0);
+    expect(receivedBody).toMatchObject({ since: "2026-01-01T00:00:00.000Z", maxMessagesPerChat: 100 });
+    expect(JSON.parse(output)).toMatchObject(responseBody);
+  });
+
+  it("wa import-zip sends multipart and returns JSON", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const AdmZip = (await import("adm-zip")).default;
+
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cli-zip-"));
+    const zipPath = path.join(tmp, "export.zip");
+    const zip = new AdmZip();
+    zip.addFile("_chat.txt", Buffer.from("dummy"));
+    fs.writeFileSync(zipPath, zip.toBuffer());
+
+    let receivedContentType = "";
+    ({ server } = await startMockServer({
+      "POST /api/import/zip-export": (req, res) => {
+        receivedContentType = req.headers["content-type"] as string;
+        res.json({ imported: 5, duplicates: 0, gapsResolved: [], textFile: "_chat.txt", attachmentsIgnored: 0 });
+      },
+    }));
+    const { port } = server.address() as { port: number };
+
+    const { output, exitCode } = await cli(["import-zip", zipPath, "--jid", "447700900123@s.whatsapp.net"], port);
+    expect(exitCode).toBe(0);
+    expect(receivedContentType).toMatch(/multipart\/form-data/);
+    expect(JSON.parse(output)).toMatchObject({ imported: 5, textFile: "_chat.txt" });
+
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
 });

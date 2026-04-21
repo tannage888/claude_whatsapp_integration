@@ -63,8 +63,10 @@ describe("Phase 1: Auth + connection", () => {
 
   it("emits qr:code and becomes qr_ready when QR event fires", async () => {
     const { useMultiFileAuthState } = await import("@whiskeysockets/baileys");
+    // Use registered=true so WhatsAppConnection skips the pairing-code path
+    // and falls through to the QR-only branch (this is the path mobile QR auth uses).
     vi.mocked(useMultiFileAuthState).mockResolvedValueOnce({
-      state: { creds: { registered: false }, keys: {} },
+      state: { creds: { registered: true }, keys: {} },
       saveCreds: vi.fn(),
     } as any);
 

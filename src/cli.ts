@@ -87,8 +87,17 @@ export async function runCli(opts: CliOptions): Promise<number> {
         print(await apiFetch(`/api/contacts/${encodeURIComponent(identifier)}/chats`));
       } else if (sub === "refresh") {
         print(await apiFetch("/api/contacts/refresh", { method: "POST" }));
+      } else if (sub === "scrape-context") {
+        const identifier = args[2];
+        if (!identifier) { err("Usage: wa contacts scrape-context <identifier> [--since <iso>] [--max <n>]"); return 1; }
+        const body: Record<string, unknown> = {};
+        const since = flag("since");
+        const max = flag("max");
+        if (since) body.since = since;
+        if (max) body.maxMessagesPerChat = parseInt(max, 10);
+        print(await apiFetch(`/api/contacts/${encodeURIComponent(identifier)}/scrape-context`, { method: "POST", body: JSON.stringify(body) }));
       } else {
-        err("Usage: wa contacts <chats <identifier>|refresh>"); return 1;
+        err("Usage: wa contacts <chats <identifier>|refresh|scrape-context <identifier>>"); return 1;
       }
     } else if (cmd === "no-read") {
       if (sub === "list") {
@@ -137,6 +146,26 @@ export async function runCli(opts: CliOptions): Promise<number> {
       if (token) hdrs["Authorization"] = `Bearer ${token}`;
       const res = await fetch(`${baseUrl}/api/import/phone-export?jid=${encodeURIComponent(jid)}`, { method: "POST", body, headers: hdrs });
       print(await res.json());
+    } else if (cmd === "import-zip") {
+      const file = sub;
+      const jid = flag("jid");
+      if (!file) { err("Usage: wa import-zip <file> [--jid <jid>]"); return 1; }
+      const fileBuffer = fs.readFileSync(file);
+      const boundary = "----FormBoundary" + Math.random().toString(36).slice(2);
+      const parts: Buffer[] = [
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="export.zip"\r\nContent-Type: application/zip\r\n\r\n`),
+        fileBuffer,
+        Buffer.from(`\r\n`),
+      ];
+      if (jid) {
+        parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chatJid"\r\n\r\n${jid}\r\n`));
+      }
+      parts.push(Buffer.from(`--${boundary}--\r\n`));
+      const body = Buffer.concat(parts);
+      const hdrs: Record<string, string> = { "Content-Type": `multipart/form-data; boundary=${boundary}` };
+      if (token) hdrs["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${baseUrl}/api/import/zip-export`, { method: "POST", body, headers: hdrs });
+      print(await res.json());
     } else {
       err([
         "Usage: wa <command>",
@@ -149,11 +178,13 @@ export async function runCli(opts: CliOptions): Promise<number> {
         "  ack <jid> --watermark <iso>",
         "  contacts chats <identifier>",
         "  contacts refresh",
+        "  contacts scrape-context <identifier> [--since <iso>] [--max <n>]",
         "  no-read list|add|remove",
         "  send --to <e164> --text <msg>",
         "  send --file <json>",
         "  gaps list",
         "  import-export <file> --jid <jid>",
+        "  import-zip <file> [--jid <jid>]",
       ].join("\n"));
       return 1;
     }
