@@ -679,7 +679,7 @@ When all phase test suites pass (including Phases 13 and 14) and Phase 12's e2e 
 ### Ralph-loop invocation
 
 ```bash
-/ralph-loop "$(cat docs/ralph-prompt.md)" \
+/ralph-loop:ralph-loop "$(cat docs/ralph-prompt.md)" \
   --completion-promise "WHATSAPP_INTEGRATION_COMPLETE" \
   --max-iterations 60
 ```
@@ -732,4 +732,4 @@ Phase 12 spec — single happy-path through every major feature.
 
 1. Create `docs/ralph-prompt.md` with the iteration-friendly prompt body.
 2. Initialise the project (Phase 0 only) so Ralph has a working scaffold to iterate on.
-3. Hand off to `/ralph-loop` to execute Phases 1–12.
+3. Hand off to `/ralph-loop:ralph-loop` to execute Phases 1–12.

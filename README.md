@@ -30,7 +30,7 @@ npm run dev
 ## Building Phases 13-14 (ralph-loop)
 
 ```bash
-/ralph-loop "$(cat docs/ralph-prompt.md)" \
+/ralph-loop:ralph-loop "$(cat docs/ralph-prompt.md)" \
   --completion-promise "WHATSAPP_INTEGRATION_COMPLETE" \
   --max-iterations 60
 ```
