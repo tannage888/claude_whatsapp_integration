@@ -11,6 +11,7 @@ export interface Config {
   BACKFILL_MAX_MESSAGES_PER_CHAT: number;
   MEMBERSHIP_REFRESH_HOURS: number;
   LOG_LEVEL: string;
+  KIT_GATEWAY_URL: string;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -44,4 +45,5 @@ export const config: Config = {
   BACKFILL_MAX_MESSAGES_PER_CHAT: intEnv("BACKFILL_MAX_MESSAGES_PER_CHAT", 500),
   MEMBERSHIP_REFRESH_HOURS: intEnv("MEMBERSHIP_REFRESH_HOURS", 24),
   LOG_LEVEL: strEnv("LOG_LEVEL", "info"),
+  KIT_GATEWAY_URL: nullableStrEnv("KIT_GATEWAY_URL") ?? "http://127.0.0.1:3141",
 };

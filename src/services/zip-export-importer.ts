@@ -16,6 +16,15 @@ export interface ZipImportResult extends ImportResult {
   inferredChatJid: string | null;
 }
 
+/**
+ * Resolves a contact's display name (extracted from the export filename) to a
+ * WhatsApp JID. Used as a fallback when the daemon's own `chats` table doesn't
+ * contain the 1:1 contact — e.g. the deployment can ask Kit's contact registry.
+ */
+export type NameResolver = (
+  name: string
+) => Promise<string | null> | string | null;
+
 // WhatsApp export filename patterns:
 //   "WhatsApp Chat with Alice Smith.txt"
 //   "_chat.txt" (iOS default)
@@ -25,13 +34,16 @@ const WA_CHAT_FILENAME_RE = /whatsapp chat with (.+?)\.txt$/i;
  * Extracts a .txt transcript from a WhatsApp Export ZIP and imports it.
  *
  * If `chatJid` is omitted, the filename is matched against `chats.display_name`
- * in the DB to infer the target. If inference fails, ZipImportError is thrown.
+ * in the DB to infer the target. If that fails and `nameResolver` is provided,
+ * the contact name extracted from the filename is passed to the resolver as a
+ * second-chance lookup. If both fail, ZipImportError is thrown.
  */
 export async function importZipExport(
   zipBuffer: Buffer,
   chatJid: string | undefined,
   store: MessageStore,
-  db: StateDb
+  db: StateDb,
+  nameResolver?: NameResolver
 ): Promise<ZipImportResult> {
   let zip: AdmZip;
   try {
@@ -64,6 +76,18 @@ export async function importZipExport(
     if (inferred) resolvedJid = inferred;
   }
 
+  // Fallback: ask the deployment-supplied resolver (e.g. Kit's contact registry).
+  // The daemon's own `chats` table never contains 1:1 contacts with display
+  // names, so without this fallback any auto-import of a 1:1 export would fail.
+  const filenameContact = extractContactNameFromFilename(textFile);
+  if (!resolvedJid && nameResolver && filenameContact) {
+    const resolved = await nameResolver(filenameContact);
+    if (resolved) {
+      resolvedJid = resolved;
+      inferred = resolved;
+    }
+  }
+
   if (!resolvedJid) {
     throw new ZipImportError(
       `cannot determine target chatJid for "${textFile}" — pass chatJid explicitly`,
@@ -71,7 +95,17 @@ export async function importZipExport(
     );
   }
 
-  const result = await importPhoneExport(text, resolvedJid, store, db);
+  // Determine the contact's display name so the importer can mark "me"
+  // messages with fromMe=true. Prefer the name embedded in the filename
+  // ("WhatsApp Chat with <name>.txt") since that's the address-book name
+  // the iOS export uses for the contact's transcript lines too. Fall back
+  // to the chats table when the file is the iOS-default `_chat.txt`.
+  const contactName =
+    extractContactNameFromFilename(textFile) ??
+    db.getChat(resolvedJid)?.displayName ??
+    null;
+
+  const result = await importPhoneExport(text, resolvedJid, store, db, contactName);
 
   return {
     ...result,
@@ -82,13 +116,17 @@ export async function importZipExport(
 }
 
 function inferChatJidFromFilename(filename: string, db: StateDb): string | null {
-  const match = WA_CHAT_FILENAME_RE.exec(filename);
-  if (!match) return null;
-  const displayName = match[1]?.trim();
+  const displayName = extractContactNameFromFilename(filename);
   if (!displayName) return null;
 
   const chat = db.listChats().find((c) => c.displayName?.toLowerCase() === displayName.toLowerCase());
   return chat?.jid ?? null;
+}
+
+function extractContactNameFromFilename(filename: string): string | null {
+  const match = WA_CHAT_FILENAME_RE.exec(filename);
+  const name = match?.[1]?.trim();
+  return name && name.length > 0 ? name : null;
 }
 
 export function isZipMimeType(mimetype: string | null | undefined): boolean {

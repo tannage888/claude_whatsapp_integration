@@ -11,6 +11,7 @@ import type { MembershipService } from "../services/membership.js";
 import { importPhoneExport } from "../services/phone-export-importer.js";
 import { importZipExport, ZipImportError } from "../services/zip-export-importer.js";
 import type { ContactContextScraper } from "../services/contact-context-scraper.js";
+import type { KitClient } from "../services/kit-client.js";
 import multer from "multer";
 
 interface RouterDeps {
@@ -23,6 +24,7 @@ interface RouterDeps {
   membership?: MembershipService;
   contextScraper?: ContactContextScraper;
   authStatePath?: string;
+  kit?: KitClient;
 }
 
 const ScrapeContextBody = z.object({
@@ -224,7 +226,8 @@ export function createApiRouter(deps: RouterDeps): Router {
     if (!file) return res.status(400).json({ error: "missing_file" });
 
     const text = file.buffer.toString("utf-8");
-    const result = await importPhoneExport(text, chatJid, wa.store, db);
+    const contactName = db.getChat(chatJid)?.displayName ?? null;
+    const result = await importPhoneExport(text, chatJid, wa.store, db, contactName);
     return res.json(result);
   });
 
@@ -241,7 +244,23 @@ export function createApiRouter(deps: RouterDeps): Router {
     const chatJid = (req.body?.chatJid as string) || (req.body?.jid as string) || (req.query.chatJid as string) || (req.query.jid as string) || undefined;
 
     try {
-      const result = await importZipExport(file.buffer, chatJid, wa.store, db);
+      const nameResolver = deps.kit
+        ? (name: string) => deps.kit!.resolveContactName(name)
+        : undefined;
+      const result = await importZipExport(file.buffer, chatJid, wa.store, db, nameResolver);
+
+      // Mirror the auto-detector path: tell Kit so it can pull the new
+      // transcript and queue a /kit-captures review card.
+      const resolved = chatJid ?? result.inferredChatJid;
+      if (deps.kit && resolved) {
+        void deps.kit.notifyImportComplete({
+          chatJid: resolved,
+          imported: result.imported,
+          duplicates: result.duplicates,
+          textFile: result.textFile,
+        });
+      }
+
       return res.json(result);
     } catch (e) {
       if (e instanceof ZipImportError) {

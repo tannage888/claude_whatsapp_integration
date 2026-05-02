@@ -6,6 +6,7 @@ import {
   importZipExport,
   isZipMimeType,
   isWhatsAppExportFilename,
+  type NameResolver,
   type ZipImportResult,
 } from "./zip-export-importer.js";
 
@@ -15,6 +16,12 @@ export interface ZipAutoDetectorOptions {
   disabled?: boolean;
   /** Injectable downloader for testing. Defaults to Baileys' downloadMediaMessage. */
   download?: (msg: proto.IWebMessageInfo) => Promise<Buffer>;
+  /**
+   * Fallback name→JID lookup, used when the daemon's chats table doesn't
+   * contain a 1:1 contact matching the export filename. The Kit deployment
+   * wires this to its contact registry.
+   */
+  nameResolver?: NameResolver;
   onImport?: (result: ZipImportResult) => void;
   onError?: (error: Error) => void;
 }
@@ -56,8 +63,15 @@ export class ZipAutoDetector {
     try {
       const buffer = await this.downloadBuffer(msg);
       // Do NOT pass msg.remoteJid — for self-sent exports remoteJid is your own JID.
-      // Let importZipExport infer chatJid from the filename.
-      const result = await importZipExport(buffer, undefined, this.store, this.db);
+      // Let importZipExport infer chatJid from the filename, with the optional
+      // resolver as a fallback when the daemon's own chats table can't help.
+      const result = await importZipExport(
+        buffer,
+        undefined,
+        this.store,
+        this.db,
+        this.opts.nameResolver
+      );
       this.opts.onImport?.(result);
       return { handled: true, result };
     } catch (e) {

@@ -7,6 +7,7 @@ import { NoReadService } from "./services/no-read.js";
 import { MembershipService } from "./services/membership.js";
 import { ContactContextScraper } from "./services/contact-context-scraper.js";
 import { ZipAutoDetector } from "./services/zip-auto-detector.js";
+import { KitClient } from "./services/kit-client.js";
 import type { proto } from "@whiskeysockets/baileys";
 
 const VERSION = "0.1.0";
@@ -22,10 +23,25 @@ async function main(): Promise<void> {
   const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS);
   const contextScraper = new ContactContextScraper(db, wa.store, membership, () => wa.getSocket());
 
+  // Kit gateway client — handles name→JID resolution (NameResolver fallback
+  // when the daemon's chats table doesn't know the contact) and the
+  // import-complete webhook so Kit can pull new transcripts into its
+  // /kit-captures review queue.
+  const kit = new KitClient(config.KIT_GATEWAY_URL);
+
   const zipDetector = new ZipAutoDetector(wa.store, db, () => wa.getSocket(), {
     disabled: process.env.DISABLE_AUTO_ZIP_IMPORT === "true",
+    nameResolver: (name) => kit.resolveContactName(name),
     onImport: (r) => {
       console.log(`📦 ZIP auto-import: imported=${r.imported} duplicates=${r.duplicates} file="${r.textFile}"`);
+      if (r.inferredChatJid) {
+        void kit.notifyImportComplete({
+          chatJid: r.inferredChatJid,
+          imported: r.imported,
+          duplicates: r.duplicates,
+          textFile: r.textFile,
+        });
+      }
     },
     onError: (e) => {
       console.error(`📦 ZIP auto-import failed: ${e.message}`);
@@ -77,6 +93,7 @@ async function main(): Promise<void> {
     membership,
     contextScraper,
     authStatePath: config.AUTH_STATE_PATH,
+    kit,
   });
   app.use("/api", apiRouter);
 

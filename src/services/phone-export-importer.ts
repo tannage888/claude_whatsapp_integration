@@ -46,7 +46,8 @@ export async function importPhoneExport(
   text: string,
   chatJid: string,
   store: MessageStore,
-  db: StateDb
+  db: StateDb,
+  contactName?: string | null
 ): Promise<ImportResult> {
   const parsed = parsePhoneExport(text);
 
@@ -65,6 +66,8 @@ export async function importPhoneExport(
     })
   );
 
+  const normalisedContact = contactName?.trim().toLowerCase() ?? null;
+
   for (const msg of parsed) {
     const key = `${msg.timestamp}|${msg.body}`;
     if (existingSet.has(key)) {
@@ -73,11 +76,17 @@ export async function importPhoneExport(
     }
     existingSet.add(key);
 
+    // In a 1:1 transcript, the only senders are the contact and "me".
+    // Without a contactName we can't tell them apart, so default to false.
+    const fromMe =
+      normalisedContact !== null &&
+      msg.sender.trim().toLowerCase() !== normalisedContact;
+
     // Synthesize a proto-like message object for the store
     const synthetic = {
       key: {
         remoteJid: chatJid,
-        fromMe: false,
+        fromMe,
         id: `import-${msg.timestamp}-${Math.random().toString(36).slice(2)}`,
       },
       message: { conversation: msg.body },

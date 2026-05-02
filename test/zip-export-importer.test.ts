@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import AdmZip from "adm-zip";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -107,6 +107,46 @@ describe("Phase 14: ZIP export importer", () => {
       });
     });
 
+    it("falls back to nameResolver when DB inference fails", async () => {
+      const buf = makeZip({ "WhatsApp Chat with Samir Patel.txt": SAMPLE_CHAT_TEXT });
+      const resolver = vi.fn(async (name: string) => {
+        return name === "Samir Patel" ? JID : null;
+      });
+      const result = await importZipExport(buf, undefined, store, db, resolver);
+      expect(resolver).toHaveBeenCalledWith("Samir Patel");
+      expect(result.inferredChatJid).toBe(JID);
+      expect(result.imported).toBe(4);
+      expect(store.get(JID)).toHaveLength(4);
+    });
+
+    it("prefers DB inference over nameResolver when both could match", async () => {
+      db.upsertChat({ jid: JID, displayName: "Alice Smith", isGroup: false });
+      const buf = makeZip({ "WhatsApp Chat with Alice Smith.txt": SAMPLE_CHAT_TEXT });
+      const resolver = vi.fn(async () => "wrong-jid@s.whatsapp.net");
+      const result = await importZipExport(buf, undefined, store, db, resolver);
+      expect(resolver).not.toHaveBeenCalled();
+      expect(result.inferredChatJid).toBe(JID);
+    });
+
+    it("throws missing_chat_jid when nameResolver returns null", async () => {
+      const buf = makeZip({ "WhatsApp Chat with Stranger.txt": SAMPLE_CHAT_TEXT });
+      const resolver = vi.fn(async () => null);
+      await expect(importZipExport(buf, undefined, store, db, resolver)).rejects.toMatchObject({
+        name: "ZipImportError",
+        code: "missing_chat_jid",
+      });
+      expect(resolver).toHaveBeenCalledWith("Stranger");
+    });
+
+    it("does not call nameResolver for _chat.txt (no name in filename)", async () => {
+      const buf = makeZip({ "_chat.txt": SAMPLE_CHAT_TEXT });
+      const resolver = vi.fn(async () => JID);
+      await expect(importZipExport(buf, undefined, store, db, resolver)).rejects.toMatchObject({
+        code: "missing_chat_jid",
+      });
+      expect(resolver).not.toHaveBeenCalled();
+    });
+
     it("prefers _chat.txt over random .txt", async () => {
       const buf = makeZip({
         "readme.txt": "just a readme",
@@ -121,6 +161,34 @@ describe("Phase 14: ZIP export importer", () => {
       const buf = makeZip({ "_chat.txt": SAMPLE_CHAT_TEXT });
       await importZipExport(buf, JID, store, db);
       expect(store.get(JID)).toHaveLength(4);
+    });
+
+    it("infers fromMe from the contact name embedded in the filename", async () => {
+      // Filename "WhatsApp Chat with Alice Smith.txt" → contactName = "Alice Smith"
+      // SAMPLE_CHAT_TEXT has 3 lines from "Alice Smith" and 1 from "Me"
+      const buf = makeZip({ "WhatsApp Chat with Alice Smith.txt": SAMPLE_CHAT_TEXT });
+      await importZipExport(buf, JID, store, db);
+      const stored = store.get(JID);
+      expect(stored).toHaveLength(4);
+      expect(stored.filter((m) => m.key?.fromMe === false)).toHaveLength(3);
+      expect(stored.filter((m) => m.key?.fromMe === true)).toHaveLength(1);
+    });
+
+    it("falls back to chats.display_name when filename is _chat.txt", async () => {
+      db.upsertChat({ jid: JID, displayName: "Alice Smith", isGroup: false });
+      const buf = makeZip({ "_chat.txt": SAMPLE_CHAT_TEXT });
+      await importZipExport(buf, JID, store, db);
+      const stored = store.get(JID);
+      expect(stored.filter((m) => m.key?.fromMe === false)).toHaveLength(3);
+      expect(stored.filter((m) => m.key?.fromMe === true)).toHaveLength(1);
+    });
+
+    it("with no display_name available, fromMe stays false for all", async () => {
+      // _chat.txt and no chat row → no contact name, no fromMe inference
+      const buf = makeZip({ "_chat.txt": SAMPLE_CHAT_TEXT });
+      await importZipExport(buf, JID, store, db);
+      const stored = store.get(JID);
+      expect(stored.every((m) => m.key?.fromMe === false)).toBe(true);
     });
   });
 
@@ -198,6 +266,42 @@ describe("Phase 14: ZIP export importer", () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("invalid_zip");
+    });
+
+    it("on success, fires kit.notifyImportComplete with the resolved chatJid", async () => {
+      const fakeWa = { store, getStatus: () => "connected", getQr: () => null, getPairingCode: () => null, wipeAuthState: () => {}, getSocket: () => null } as unknown as WhatsAppConnection;
+      const notifyImportComplete = vi.fn().mockResolvedValue(undefined);
+      const resolveContactName = vi.fn().mockResolvedValue(null);
+      const app = express();
+      app.use(express.json());
+      app.use(
+        "/api",
+        createApiRouter({
+          startedAt: Date.now(),
+          version: "test",
+          getConnectionStatus: () => "connected",
+          whatsapp: fakeWa,
+          db,
+          authStatePath: "/tmp/auth",
+          kit: { resolveContactName, notifyImportComplete } as any,
+        })
+      );
+
+      const buf = makeZip({ "WhatsApp Chat with Alice.txt": SAMPLE_CHAT_TEXT });
+      const res = await request(app)
+        .post("/api/import/zip-export")
+        .field("chatJid", JID)
+        .attach("file", buf, { filename: "export.zip", contentType: "application/zip" });
+
+      expect(res.status).toBe(200);
+      // Allow the fire-and-forget webhook to settle
+      await new Promise((r) => setImmediate(r));
+      expect(notifyImportComplete).toHaveBeenCalledWith({
+        chatJid: JID,
+        imported: 4,
+        duplicates: 0,
+        textFile: "WhatsApp Chat with Alice.txt",
+      });
     });
   });
 });

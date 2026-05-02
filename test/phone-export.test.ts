@@ -85,6 +85,38 @@ describe("Phase 9: Phone-export importer", () => {
       expect(result2.imported).toBe(0);
     });
 
+    it("without contactName, all imported messages default to fromMe=false", async () => {
+      const text = fs.readFileSync(FIXTURE_PATH, "utf-8");
+      await importPhoneExport(text, JID, store, db);
+      const stored = store.get(JID);
+      expect(stored).toHaveLength(7);
+      expect(stored.every((m) => m.key?.fromMe === false)).toBe(true);
+    });
+
+    it("with contactName, messages from contact have fromMe=false and others have fromMe=true", async () => {
+      const text = fs.readFileSync(FIXTURE_PATH, "utf-8");
+      await importPhoneExport(text, JID, store, db, "Alice Smith");
+      const stored = store.get(JID);
+      expect(stored).toHaveLength(7);
+
+      const fromContact = stored.filter((m) => m.key?.fromMe === false);
+      const fromMe = stored.filter((m) => m.key?.fromMe === true);
+      // Fixture: 4 lines from "Alice Smith", 3 from "Me"
+      expect(fromContact).toHaveLength(4);
+      expect(fromMe).toHaveLength(3);
+      expect(fromContact.every((m) => m.participant === "Alice Smith")).toBe(true);
+      expect(fromMe.every((m) => m.participant === "Me")).toBe(true);
+    });
+
+    it("contactName matching is case-insensitive and trimmed", async () => {
+      const text = "[12/04/2026, 09:01:14] Alice Smith: hi\n[12/04/2026, 09:02:00] Me: hello";
+      await importPhoneExport(text, JID, store, db, "  alice smith  ");
+      const stored = store.get(JID);
+      expect(stored).toHaveLength(2);
+      expect(stored[0]!.key?.fromMe).toBe(false);
+      expect(stored[1]!.key?.fromMe).toBe(true);
+    });
+
     it("import covering an open gap auto-resolves it", async () => {
       // Create a gap covering the fixture file's date range
       const gapFrom = new Date("2026-04-12T00:00:00Z").getTime();

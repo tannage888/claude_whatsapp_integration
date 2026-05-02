@@ -140,4 +140,25 @@ describe("Phase 14: ZIP auto-detector", () => {
     expect(result.handled).toBe(false);
     expect(result.error).toMatch(/chatJid/i);
   });
+
+  it("handle() falls back to nameResolver when DB inference fails", async () => {
+    // Wipe chats so DB inference fails — resolver must rescue
+    db.close();
+    db = new StateDb(":memory:");
+
+    const resolver = vi.fn(async (name: string) =>
+      name === "Alice Smith" ? ALICE_JID : null
+    );
+    const d = new ZipAutoDetector(store, db, () => null, {
+      download: async () => makeZipBuffer(),
+      nameResolver: resolver,
+    });
+
+    const result = await d.handle(docMessage({ fromMe: true }));
+    expect(result.handled).toBe(true);
+    expect(result.result?.imported).toBe(2);
+    expect(result.result?.inferredChatJid).toBe(ALICE_JID);
+    expect(resolver).toHaveBeenCalledWith("Alice Smith");
+    expect(store.get(ALICE_JID)).toHaveLength(2);
+  });
 });
