@@ -11,8 +11,8 @@ Phases 0-12 complete (102 tests passing). Phases 13-14 planned — build them vi
 | Phase | Feature | Status |
 |---|---|---|
 | 0-12 | Core integration (auth, capture, transcripts, send, membership, gaps, CLI, e2e) | ✅ Complete |
-| 13 | Contact context scraper — fetch full history for all chats a contact belongs to | 🔲 Planned |
-| 14 | ZIP export ingestion — manual upload + automatic self-sent ZIP detection | 🔲 Planned |
+| 13 | Contact context scraper — fetch full history for all chats a contact belongs to | ✅ Complete |
+| 14 | ZIP export ingestion — manual upload + automatic self-sent ZIP detection | ✅ Complete |
 
 ## Setup
 
@@ -27,56 +27,48 @@ npm run dev
 
 `GET http://localhost:3100/api/status` should return `{ "status": "ok", ... }`.
 
-## Building Phases 13-14 (ralph-loop)
+## Running on Windows startup
 
-```bash
-/ralph-loop:ralph-loop "$(cat docs/ralph-prompt.md)" \
-  --completion-promise "WHATSAPP_INTEGRATION_COMPLETE" \
-  --max-iterations 60
+To launch the daemon automatically when you log in:
+
+1. Create a `.bat` somewhere stable, e.g. `scripts\start-daemon.bat`:
+
+   ```bat
+   @echo off
+   setlocal
+   set "DAEMON_DIR=%~dp0.."
+   set "LOG_DIR=%~dp0..\logs"
+   if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+   cd /d "%DAEMON_DIR%"
+   call npm run start >> "%LOG_DIR%\daemon.log" 2>&1
+   ```
+
+   Double-click it to test — `GET http://localhost:3100/api/status` should respond, then close the window.
+
+2. Open Task Scheduler (`taskschd.msc`) → **Create Task…**
+3. **General**: name it `WhatsApp Daemon`, "Run only when user is logged on".
+4. **Triggers** → New → **At log on**, your user.
+5. **Actions** → New → **Start a program** → browse to the `.bat`.
+6. **Conditions**: untick "Start only if on AC power" if you're on a laptop.
+7. **Settings**: tick "Allow task to be run on demand" and "If the task fails, restart every 1 minute" up to 3 attempts.
+8. Save, then right-click the task → **Run** to verify.
+
+A `cmd.exe` window will appear at each login. To hide it, point the task action at this one-line VBScript shim instead of the `.bat`:
+
+```vbs
+CreateObject("WScript.Shell").Run Chr(34) & "C:\full\path\to\start-daemon.bat" & Chr(34), 0, False
 ```
 
-Ralph will pick up from `RESUME_NOTES.md` (all prior phases are complete) and build Phases 13 and 14. If interrupted, re-run the same command and ralph resumes from where it left off.
+Note: if the WhatsApp session in `auth_state/` expires, the daemon will print a fresh QR code at startup. With a hidden window you won't see it — re-run the task in foreground (`schtasks /Run /TN "WhatsApp Daemon"` from a visible terminal, or temporarily switch the action back to the `.bat`) to scan it.
 
-### Phase 13: Contact context scraper
+Manage from PowerShell:
 
-Given a contact identifier (`+E164`, JID, or display name), fetches the complete message history across **every chat** that contact belongs to. This gives full conversational context rather than requiring you to know which specific chat to query.
-
-**New endpoint:** `POST /api/contacts/{identifier}/scrape-context`
-```json
-// Request
-{ "maxMessagesPerChat": 500, "since": "2026-01-01T00:00:00Z" }
-
-// Response
-{
-  "contactJid": "447700900123@s.whatsapp.net",
-  "chats": [
-    { "jid": "120363..@g.us", "displayName": "Family Group", "type": "group", "messagesBackfilled": 42 },
-    { "jid": "447700900123@s.whatsapp.net", "displayName": "Alice", "type": "individual", "messagesBackfilled": 7 }
-  ],
-  "totalMessagesBackfilled": 49
-}
+```powershell
+schtasks /Query /TN "WhatsApp Daemon" /V /FO LIST
+schtasks /Run    /TN "WhatsApp Daemon"
+schtasks /End    /TN "WhatsApp Daemon"
+schtasks /Delete /TN "WhatsApp Daemon" /F
 ```
-
-**New CLI:** `wa contacts scrape-context +447700900123 [--since 2026-01-01] [--max 1000]`
-
-**New service:** `src/services/contact-context-scraper.ts`
-
-### Phase 14: ZIP export ingestion
-
-Accepts the ZIP file produced by WhatsApp's built-in "Export Chat" feature (Android/iOS). Contains a `.txt` transcript and optional media attachments. Hands the `.txt` file to the existing phone-export parser.
-
-**Two modes:**
-
-**Manual upload** — `POST /api/import/zip-export` (multipart, optional `chatJid` field):
-```json
-{ "imported": 432, "duplicates": 1207, "gapsResolved": [3, 7], "textFile": "WhatsApp Chat with Alice.txt", "attachmentsIgnored": 12 }
-```
-
-**Automatic detection** — when you send the export ZIP to yourself via WhatsApp, the daemon detects the self-sent document, downloads it, and ingests it automatically. Disable with `DISABLE_AUTO_ZIP_IMPORT=true`.
-
-**New CLI:** `wa import-zip ./WhatsApp_Chat_with_Alice.zip [--jid <jid>]`
-
-**New service:** `src/services/zip-export-importer.ts` (uses `adm-zip`)
 
 ## Commands
 

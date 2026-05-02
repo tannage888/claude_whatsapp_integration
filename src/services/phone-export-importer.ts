@@ -1,8 +1,11 @@
 import type { MessageStore } from "./message-store.js";
 import type { StateDb } from "./state-db.js";
 
-// Matches: [DD/MM/YYYY, HH:MM:SS] Sender: body
-const MSG_LINE_RE = /^\[(\d{2}\/\d{2}\/\d{4}), (\d{2}:\d{2}:\d{2})\] ([^:]+): (.+)$/;
+// iOS:     [DD/MM/YYYY, HH:MM:SS] Sender: body   (4-digit year, brackets, HH:MM:SS)
+// Android:  DD/MM/YY, HH:MM - Sender: body        (2-digit year, no brackets, HH:MM, " - " separator)
+// Both: day/month order (UK/EU locale); date-month order varies by phone region.
+const IOS_LINE_RE = /^\[(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s(\d{1,2}):(\d{2})(?::(\d{2}))?\]\s([^:]+):\s(.+)$/;
+const ANDROID_LINE_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4}),\s(\d{1,2}):(\d{2})(?::(\d{2}))?\s-\s([^:]+):\s(.+)$/;
 
 export interface ParsedExportMessage {
   timestamp: number; // epoch ms
@@ -16,26 +19,63 @@ export interface ImportResult {
   gapsResolved: number[];
 }
 
+interface ParsedHeader {
+  day: string;
+  month: string;
+  year: string;
+  hour: string;
+  minute: string;
+  second: string;
+  sender: string;
+  body: string;
+}
+
+function matchHeaderLine(line: string): ParsedHeader | null {
+  const m = IOS_LINE_RE.exec(line) ?? ANDROID_LINE_RE.exec(line);
+  if (!m) return null;
+  return {
+    day: m[1]!,
+    month: m[2]!,
+    year: m[3]!,
+    hour: m[4]!,
+    minute: m[5]!,
+    second: m[6] ?? "00",
+    sender: m[7]!,
+    body: m[8]!,
+  };
+}
+
+function tryDate(year: string, month: string, day: string, hh: string, mm: string, ss: string): number {
+  const fullYear = year.length === 2 ? `20${year}` : year;
+  const pad = (s: string) => s.padStart(2, "0");
+  const tsStr = `${fullYear}-${pad(month)}-${pad(day)}T${pad(hh)}:${mm}:${ss}`;
+  return new Date(tsStr).getTime();
+}
+
+function headerToTimestamp(h: ParsedHeader): number {
+  // Phone export date order varies: UK is DD/MM, US is MM/DD. Try DD/MM first;
+  // if it produces NaN (e.g. month > 12) swap to MM/DD. If both are valid we
+  // keep the DD/MM result — ambiguous dates like 10/10 are interpreted that way.
+  const ddmm = tryDate(h.year, h.month, h.day, h.hour, h.minute, h.second);
+  if (!Number.isNaN(ddmm)) return ddmm;
+  return tryDate(h.year, h.day, h.month, h.hour, h.minute, h.second);
+}
+
 export function parsePhoneExport(text: string): ParsedExportMessage[] {
   const lines = text.split("\n");
   const messages: ParsedExportMessage[] = [];
   let current: ParsedExportMessage | null = null;
 
   for (const line of lines) {
-    const match = MSG_LINE_RE.exec(line.trimEnd());
-    if (match) {
+    const trimmed = line.trimEnd();
+    const header = matchHeaderLine(trimmed);
+    if (header) {
       if (current) messages.push(current);
-      const date = match[1]!;
-      const time = match[2]!;
-      const sender = match[3]!;
-      const body = match[4]!;
-      const [day, month, year] = date.split("/");
-      const tsStr = `${year}-${month}-${day}T${time}`;
-      const timestamp = new Date(tsStr).getTime();
-      current = { timestamp, sender: sender.trim(), body: body.trim() };
+      const timestamp = headerToTimestamp(header);
+      current = { timestamp, sender: header.sender.trim(), body: header.body.trim() };
     } else if (current && line.trim()) {
       // Multi-line message continuation
-      current.body += "\n" + line.trimEnd();
+      current.body += "\n" + trimmed;
     }
   }
   if (current) messages.push(current);
@@ -69,6 +109,10 @@ export async function importPhoneExport(
   const normalisedContact = contactName?.trim().toLowerCase() ?? null;
 
   for (const msg of parsed) {
+    // Skip lines whose date couldn't be parsed (NaN timestamp). Logging the
+    // first such line each batch is enough — bursts mean "format mismatch".
+    if (!Number.isFinite(msg.timestamp)) continue;
+
     const key = `${msg.timestamp}|${msg.body}`;
     if (existingSet.has(key)) {
       duplicates++;

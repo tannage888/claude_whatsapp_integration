@@ -134,6 +134,9 @@ export function buildTranscript(
   const rawMsgs = store.get(jid);
   const filtered = rawMsgs.filter((msg) => {
     const ts = msgTimestampMs(msg);
+    // Drop messages with invalid/zero timestamps — they crash toIso downstream
+    // and represent malformed imports rather than real conversation content.
+    if (!Number.isFinite(ts) || ts <= 0) return false;
     if (fromMs !== null && ts <= fromMs) return false;
     if (ts > toMs) return false;
     return !!msgBody(msg);

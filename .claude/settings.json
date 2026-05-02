@@ -23,7 +23,12 @@
       "Bash(\"C:/Users/seang/.claude/plugins/cache/claude-plugins-official/ralph-loop/1.0.0/scripts/setup-ralph-loop.sh\" *)",
       "Bash(C:/Users/seang/.claude/plugins/cache/claude-plugins-official/ralph-loop/1.0.0/scripts/setup-ralph-loop.sh *)",
       "Skill(update-config)",
-      "Skill(update-config:*)"
+      "Skill(update-config:*)",
+      "Bash(curl -s http://localhost:3100/api/status)",
+      "Bash(curl -s http://127.0.0.1:3142/api/status)",
+      "Bash(curl -s -m 2 http://127.0.0.1:3142/api/status)",
+      "Bash(echo \"exit=$?\")",
+      "PowerShell($pids = \\(Get-NetTCPConnection -LocalPort 3142 -State Listen -ErrorAction SilentlyContinue\\).OwningProcess | Select-Object -Unique; foreach \\($p in $pids\\) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue; \"killed $p\" })"
     ]
   }
 }

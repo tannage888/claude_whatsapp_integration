@@ -13,3 +13,4 @@ coverage/
 .vitest-cache/
 *.log
 RESUME_NOTES.md
+project.md

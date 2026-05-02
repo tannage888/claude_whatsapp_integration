@@ -140,7 +140,10 @@ export class WhatsAppConnection extends EventEmitter {
     this.socket.ev.on("messages.upsert", ({ messages, type }) => {
       this.store.buffer(messages);
 
-      if (type !== "notify") return;
+      // Treat both "notify" (real-time) and "append" (multi-device sync of
+      // self-sent messages) as live events for the raw hook. Without this,
+      // self-sent ZIPs from your phone never reach the auto-detector.
+      if (type !== "notify" && type !== "append") return;
 
       for (const msg of messages) {
         // Emit raw proto for hooks that need more than the text-body parser (e.g. ZIP auto-detect)
