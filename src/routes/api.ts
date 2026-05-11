@@ -188,6 +188,26 @@ export function createApiRouter(deps: RouterDeps): Router {
     return res.status(201).json(result);
   });
 
+  // ── Groups ───────────────────────────────────────────────
+
+  router.get("/groups", async (_req, res) => {
+    const wa = deps.whatsapp;
+    if (!wa) return res.status(503).json({ error: "whatsapp_not_initialised" });
+    const sock = wa.getSocket();
+    if (!sock) return res.status(503).json({ error: "socket_not_ready" });
+
+    const raw = await sock.groupFetchAllParticipating();
+    const groups = Object.values(raw).map((g) => ({
+      jid: g.id,
+      name: g.subject,
+      participants: (g.participants ?? [])
+        .map((p) => p.id)
+        .filter((id) => id.endsWith("@s.whatsapp.net"))
+        .map((id) => `+${id.replace("@s.whatsapp.net", "")}`),
+    }));
+    return res.json({ groups });
+  });
+
   // ── Send ──────────────────────────────────────────────────
 
   router.post("/send", async (req, res) => {
