@@ -12,6 +12,7 @@ export interface Config {
   MEMBERSHIP_REFRESH_HOURS: number;
   LOG_LEVEL: string;
   KIT_GATEWAY_URL: string;
+  WA_INCOMING_HOOK_URL: string | null;
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -46,4 +47,5 @@ export const config: Config = {
   MEMBERSHIP_REFRESH_HOURS: intEnv("MEMBERSHIP_REFRESH_HOURS", 24),
   LOG_LEVEL: strEnv("LOG_LEVEL", "info"),
   KIT_GATEWAY_URL: nullableStrEnv("KIT_GATEWAY_URL") ?? "http://127.0.0.1:3141",
+  WA_INCOMING_HOOK_URL: nullableStrEnv("WA_INCOMING_HOOK_URL"),
 };

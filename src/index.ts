@@ -55,6 +55,24 @@ async function main(): Promise<void> {
     }
   });
 
+  // Forward incoming messages to Kit's live-push endpoint (best-effort)
+  if (config.WA_INCOMING_HOOK_URL) {
+    const hookUrl = config.WA_INCOMING_HOOK_URL;
+    wa.on("message:received", (msg: any) => {
+      fetch(hookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          remoteJid:  msg.remoteJid,
+          fromMe:     msg.fromMe ?? false,
+          body:       msg.body ?? "",
+          timestamp:  msg.timestamp,
+          messageId:  msg.messageId,
+        }),
+      }).catch(() => {}); // best-effort; Kit outage must not crash the daemon
+    });
+  }
+
   // Wire ZIP auto-detection into every incoming raw message
   if (!zipDetector.disabled) {
     wa.on("message:raw", (raw: proto.IWebMessageInfo) => {
