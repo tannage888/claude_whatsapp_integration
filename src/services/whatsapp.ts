@@ -65,6 +65,11 @@ export class WhatsAppConnection extends EventEmitter {
       logger,
       printQRInTerminal: false,
       markOnlineOnConnect: false,
+      // Request the full history dump on link rather than Baileys' default
+      // recent-only window. The initial sync fires exactly once per pairing,
+      // so this must be set before the device is linked — it is the only
+      // chance to recover history predating the link.
+      syncFullHistory: true,
     });
 
     this.socket.ev.on("creds.update", saveCreds);
