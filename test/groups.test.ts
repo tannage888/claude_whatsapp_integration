@@ -13,7 +13,8 @@ function makeApp(socketOverride?: object) {
     getQr: () => null,
     getPairingCode: () => null,
     getSocket: () => socketOverride ?? null,
-    store: {} as WhatsAppConnection["store"],
+    // Real MessageStore surface the route relies on for lid→phone lookups.
+    store: { phoneForLid: () => undefined } as unknown as WhatsAppConnection["store"],
     wipeAuthState: () => {},
   } as unknown as WhatsAppConnection;
 

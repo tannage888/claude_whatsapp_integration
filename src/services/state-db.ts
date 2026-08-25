@@ -169,12 +169,36 @@ export class StateDb {
   }
 
   findChatsForParticipant(participantJid: string): Array<{ chatJid: string; displayName: string | null; lastVerifiedAt: number }> {
+    return this.findChatsForParticipants([participantJid]);
+  }
+
+  /**
+   * Chats containing any of the given participant ids.
+   *
+   * A person has two identifiers — a phone JID and a @lid — and which one a
+   * row was written under depends on how WhatsApp addressed that group.
+   * Querying both is what makes membership findable regardless.
+   */
+  findChatsForParticipants(participantJids: string[]): Array<{ chatJid: string; displayName: string | null; lastVerifiedAt: number }> {
+    const ids = [...new Set(participantJids.filter(Boolean))];
+    if (ids.length === 0) return [];
+
+    const placeholders = ids.map(() => "?").join(", ");
     return (
       this.db
         .prepare(
-          `SELECT chat_jid, display_name, last_verified_at FROM chat_members WHERE participant_jid = ?`
+          // Membership rows carry no chat name — a metadata refresh writes
+          // them with display_name null — so fall back to the chats table,
+          // otherwise callers get bare JIDs they cannot show anyone.
+          `SELECT m.chat_jid                                       AS chat_jid,
+                  COALESCE(MAX(m.display_name), MAX(c.display_name)) AS display_name,
+                  MAX(m.last_verified_at)                          AS last_verified_at
+             FROM chat_members m
+             LEFT JOIN chats c ON c.jid = m.chat_jid
+            WHERE m.participant_jid IN (${placeholders})
+            GROUP BY m.chat_jid`
         )
-        .all(participantJid) as Array<{ chat_jid: string; display_name: string | null; last_verified_at: number }>
+        .all(...ids) as Array<{ chat_jid: string; display_name: string | null; last_verified_at: number }>
     ).map((r) => ({ chatJid: r.chat_jid, displayName: r.display_name, lastVerifiedAt: r.last_verified_at }));
   }
 

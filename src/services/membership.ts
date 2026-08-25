@@ -1,5 +1,5 @@
 import type { StateDb } from "./state-db.js";
-import { resolveIdentifier } from "../utils/jid.js";
+import { resolveIdentifier, isLidJid } from "../utils/jid.js";
 
 export interface ContactChats {
   participantJid: string;
@@ -11,13 +11,24 @@ export interface ContactChats {
   }>;
 }
 
+/**
+ * The subset of MessageStore membership needs: translating between a
+ * person's two WhatsApp identifiers.
+ */
+export interface LidResolver {
+  phoneForLid(lid: string): string | undefined;
+  lidForPhone(phoneJid: string): string | undefined;
+  registerLid(lid: string, phoneJid: string): void;
+}
+
 export class MembershipService {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly db: StateDb,
     private readonly getSocket: () => import("@whiskeysockets/baileys").WASocket | null,
-    private readonly refreshHours: number = 24
+    private readonly refreshHours: number = 24,
+    private readonly lids?: LidResolver
   ) {}
 
   /** Called on every incoming group message to update the membership table. */
@@ -37,12 +48,30 @@ export class MembershipService {
     for (const [chatJid, meta] of Object.entries(groups)) {
       this.db.upsertChat({ jid: chatJid, displayName: meta.subject ?? null, isGroup: true, lastActivityAt: Date.now() });
       for (const participant of meta.participants ?? []) {
-        this.db.upsertChatMember({
-          chatJid,
-          participantJid: participant.id,
-          displayName: null,
-          lastVerifiedAt: Date.now(),
-        });
+        // Baileys reports `id` in whatever form the group is addressed with
+        // (@lid for most groups now) and carries the phone form separately.
+        // Record both, and teach the lid map the pairing while we have it.
+        const ids = new Set<string>();
+        if (participant.id) ids.add(participant.id);
+
+        const lid =
+          participant.lid ?? (participant.id?.endsWith("@lid") ? participant.id : undefined);
+        const phoneJid =
+          participant.jid ??
+          (participant.id?.endsWith("@s.whatsapp.net") ? participant.id : undefined) ??
+          (lid ? this.lids?.phoneForLid(lid) : undefined);
+
+        if (phoneJid) ids.add(phoneJid);
+        if (lid && phoneJid) this.lids?.registerLid(lid, phoneJid);
+
+        for (const participantJid of ids) {
+          this.db.upsertChatMember({
+            chatJid,
+            participantJid,
+            displayName: null,
+            lastVerifiedAt: Date.now(),
+          });
+        }
         membersUpdated++;
       }
     }
@@ -53,7 +82,21 @@ export class MembershipService {
   /** Query which chats a contact belongs to. */
   getChatsForContact(identifier: string): ContactChats {
     const participantJid = resolveIdentifier(identifier);
-    const rows = this.db.findChatsForParticipant(participantJid);
+
+    // Membership rows are written under whichever id WhatsApp used, so look
+    // the person up under both. Without this a phone-number lookup misses
+    // every lid-addressed group — which is now nearly all of them.
+    const candidates = [participantJid];
+    const lid = isLidJid(participantJid)
+      ? participantJid
+      : this.lids?.lidForPhone(participantJid);
+    if (lid) candidates.push(lid);
+    if (isLidJid(participantJid)) {
+      const phone = this.lids?.phoneForLid(participantJid);
+      if (phone) candidates.push(phone);
+    }
+
+    const rows = this.db.findChatsForParticipants(candidates);
     return {
       participantJid,
       identifier,
