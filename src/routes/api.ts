@@ -12,6 +12,7 @@ import { importPhoneExport } from "../services/phone-export-importer.js";
 import { importZipExport, ZipImportError } from "../services/zip-export-importer.js";
 import type { ContactContextScraper } from "../services/contact-context-scraper.js";
 import type { KitClient } from "../services/kit-client.js";
+import type { SessionHealth } from "../services/session-health.js";
 import multer from "multer";
 
 interface RouterDeps {
@@ -25,6 +26,7 @@ interface RouterDeps {
   contextScraper?: ContactContextScraper;
   authStatePath?: string;
   kit?: KitClient;
+  sessionHealth?: SessionHealth;
 }
 
 const ScrapeContextBody = z.object({
@@ -75,6 +77,18 @@ export function createApiRouter(deps: RouterDeps): Router {
     }
     wa.wipeAuthState(authStatePath);
     return res.json({ ok: true });
+  });
+
+  router.get("/health/sessions", (_req, res) => {
+    const sh = deps.sessionHealth;
+    if (!sh) return res.status(503).json({ error: "session_health_not_initialised" });
+    const broken = sh.broken();
+    return res.json({
+      healthy: broken.length === 0,
+      brokenCount: broken.length,
+      broken,
+      tracked: sh.report(),
+    });
   });
 
   // ── Chats / Read ──────────────────────────────────────────
