@@ -14,3 +14,6 @@ coverage/
 *.log
 RESUME_NOTES.md
 project.md
+
+# Auth backups contain WhatsApp credentials and captured message history
+auth_backups/

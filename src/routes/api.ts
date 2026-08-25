@@ -197,14 +197,26 @@ export function createApiRouter(deps: RouterDeps): Router {
     if (!sock) return res.status(503).json({ error: "socket_not_ready" });
 
     const raw = await sock.groupFetchAllParticipating();
-    const groups = Object.values(raw).map((g) => ({
-      jid: g.id,
-      name: g.subject,
-      participants: (g.participants ?? [])
-        .map((p) => p.id)
-        .filter((id) => id.endsWith("@s.whatsapp.net"))
-        .map((id) => `+${id.replace("@s.whatsapp.net", "")}`),
-    }));
+    const groups = Object.values(raw).map((g) => {
+      // `id` is whatever form the group is addressed with — @lid for most
+      // groups now. The phone form comes from `jid`, or from the lid map when
+      // the metadata omits it. Reading `id` alone drops every participant.
+      const phones: string[] = [];
+      let unresolved = 0;
+
+      for (const p of g.participants ?? []) {
+        const lid = p.lid ?? (p.id?.endsWith("@lid") ? p.id : undefined);
+        const phoneJid =
+          p.jid ??
+          (p.id?.endsWith("@s.whatsapp.net") ? p.id : undefined) ??
+          (lid ? wa.store.phoneForLid(lid) : undefined);
+
+        if (phoneJid) phones.push(`+${phoneJid.replace("@s.whatsapp.net", "")}`);
+        else unresolved++;
+      }
+
+      return { jid: g.id, name: g.subject, participants: phones, unresolvedParticipants: unresolved };
+    });
     return res.json({ groups });
   });
 

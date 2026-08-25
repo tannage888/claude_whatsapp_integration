@@ -4,6 +4,17 @@ import type { proto } from "@whiskeysockets/baileys";
 const SAVE_INTERVAL_MS = 60_000;
 const CAP_PER_JID = 500;
 
+/**
+ * Baileys extends the proto message key with paired lid/phone identifiers.
+ * They are absent from proto.IMessageKey, so they are declared here.
+ */
+type IdentityKey = proto.IMessageKey & {
+  senderLid?: string | null;
+  senderPn?: string | null;
+  participantLid?: string | null;
+  participantPn?: string | null;
+};
+
 export class MessageStore {
   private messages = new Map<string, proto.IWebMessageInfo[]>();
   private lidToJid = new Map<string, string>();
@@ -69,8 +80,52 @@ export class MessageStore {
     }
   }
 
+  /**
+   * Harvest lid↔phone pairs carried on a message key.
+   *
+   * WhatsApp addresses group participants (and increasingly DM senders) by
+   * @lid, but every key carries the phone-number form alongside it. Learning
+   * from message traffic is far more complete than waiting for
+   * contacts.upsert, which only ever covers people saved in your address book.
+   */
+  private harvestIdentity(key: IdentityKey | null | undefined): void {
+    if (!key) return;
+
+    const participantLid =
+      key.participantLid ??
+      (key.participant?.endsWith("@lid") ? key.participant : undefined);
+
+    const pairs: Array<[string | null | undefined, string | null | undefined]> = [
+      [participantLid, key.participantPn],
+      [key.senderLid, key.senderPn],
+    ];
+
+    for (const [lid, phoneJid] of pairs) {
+      if (!lid?.endsWith("@lid")) continue;
+      if (!phoneJid?.endsWith("@s.whatsapp.net")) continue;
+      if (this.lidToJid.get(lid) === phoneJid) continue;
+      this.registerLid(lid, phoneJid);
+    }
+  }
+
+  /** Look up the phone JID for a @lid, if known. */
+  phoneForLid(lid: string): string | undefined {
+    return this.lidToJid.get(lid);
+  }
+
+  /** Look up the @lid for a phone JID, if known. */
+  lidForPhone(phoneJid: string): string | undefined {
+    return this.jidToLid.get(phoneJid);
+  }
+
+  /** Number of known lid→phone mappings. */
+  get lidMappingSize(): number {
+    return this.lidToJid.size;
+  }
+
   buffer(msgs: proto.IWebMessageInfo[]): void {
     for (const msg of msgs) {
+      this.harvestIdentity(msg.key as IdentityKey | null | undefined);
       const rawJid = msg.key?.remoteJid;
       // NOTE: @g.us (groups) intentionally included — unlike kit gateway
       if (!rawJid || rawJid.endsWith("@broadcast")) continue;

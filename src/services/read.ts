@@ -145,8 +145,22 @@ export function buildTranscript(
   const messages: TranscriptMessage[] = filtered.map((msg) => {
     const ts = msgTimestampMs(msg);
     const isGroupMsg = jid.endsWith("@g.us");
+    // Group senders arrive as @lid. Prefer the phone form the key carries,
+    // then the learned lid map, so callers get an id they can match against
+    // a contact rather than an opaque identifier.
+    const key = msg.key as (typeof msg.key & {
+      participantPn?: string | null;
+      participantLid?: string | null;
+    }) | null | undefined;
+    const rawParticipant =
+      (key?.participant as string | undefined) ?? (msg.participant as string | undefined);
+    const participantLid =
+      key?.participantLid ?? (rawParticipant?.endsWith("@lid") ? rawParticipant : undefined);
     const senderJid = isGroupMsg
-      ? ((msg.key?.participant as string) ?? (msg.participant as string) ?? jid)
+      ? (key?.participantPn ??
+         (participantLid ? store.phoneForLid(participantLid) : undefined) ??
+         rawParticipant ??
+         jid)
       : jid;
     const body = msgBody(msg) ?? "";
 

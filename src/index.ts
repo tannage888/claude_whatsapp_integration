@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   const db = new StateDb(config.STATE_DB_PATH);
   const wa = new WhatsAppConnection(config.MESSAGE_STORE_PATH);
   const noRead = new NoReadService(db, wa.store);
-  const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS);
+  const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS, wa.store);
   const contextScraper = new ContactContextScraper(db, wa.store, membership, () => wa.getSocket());
 
   // Kit gateway client — handles name→JID resolution (NameResolver fallback
