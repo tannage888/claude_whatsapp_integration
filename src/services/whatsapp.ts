@@ -97,8 +97,12 @@ export class WhatsAppConnection extends EventEmitter {
       }
     });
 
-    this.socket.ev.on("messaging-history.set", ({ messages }) => {
+    this.socket.ev.on("messaging-history.set", ({ messages, isLatest }) => {
       this.store.buffer(messages);
+      // Reconnect history is what actually fills an offline gap, and it lands
+      // seconds after the socket opens. Announce it so gap coverage is judged
+      // against the messages that arrived, not the ones on disk at startup.
+      this.emit("history:set", { count: messages.length, isLatest: isLatest ?? false });
     });
 
     // Track whether we've already requested a pairing code for this session

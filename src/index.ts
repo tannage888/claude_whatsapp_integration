@@ -13,6 +13,7 @@ import { SessionHealth } from "./services/session-health.js";
 import type { proto } from "@whiskeysockets/baileys";
 
 const VERSION = "0.1.0";
+const GAP_REVIEW_DEBOUNCE_MS = 5_000;
 
 async function main(): Promise<void> {
   const startedAt = Date.now();
@@ -24,7 +25,7 @@ async function main(): Promise<void> {
   const noRead = new NoReadService(db, wa.store);
   const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS, wa.store);
   const contextScraper = new ContactContextScraper(db, wa.store, membership, () => wa.getSocket());
-  const gapDetector = new GapDetector(db, wa.store, () => wa.getSocket(), config.BACKFILL_MAX_MESSAGES_PER_CHAT);
+  const gapDetector = new GapDetector(db, wa.store);
 
   // A broken Signal session drops every message in a chat without raising
   // anything, so record it as a gap — the same channel an offline daemon
@@ -129,17 +130,35 @@ async function main(): Promise<void> {
 
   await wa.connect();
 
-  // Anything missed while the daemon was down is a gap. Backfill it now that
-  // the socket is live, rather than discovering the hole weeks later.
+  // Anything missed while the daemon was down is a gap. Record it now that the
+  // socket is live, rather than discovering the hole weeks later.
   wa.once("connection:open", () => {
-    void gapDetector
-      .detectAndBackfill()
-      .then(({ gapsRecorded, backfillAttempted }) => {
-        if (gapsRecorded > 0) {
-          console.log(`🕳️  Gaps detected: ${gapsRecorded}, backfill attempted on ${backfillAttempted}`);
-        }
-      })
-      .catch((e: Error) => console.error(`Gap detection failed: ${e.message}`));
+    try {
+      const { gapsRecorded, alreadyCovered } = gapDetector.detect();
+      if (gapsRecorded > 0) {
+        console.log(`🕳️  Gaps detected: ${gapsRecorded} (${alreadyCovered} already covered)`);
+      }
+    } catch (e) {
+      console.error(`Gap detection failed: ${(e as Error).message}`);
+    }
+  });
+
+  // Reconnect history arrives in batches over the seconds after the socket
+  // opens; each one can close an open gap. Re-check on the trailing edge so a
+  // burst of batches costs one pass rather than one per batch.
+  let gapReviewTimer: ReturnType<typeof setTimeout> | null = null;
+  wa.on("history:set", () => {
+    if (gapReviewTimer) clearTimeout(gapReviewTimer);
+    gapReviewTimer = setTimeout(() => {
+      gapReviewTimer = null;
+      try {
+        const closed = gapDetector.reviewOpenGaps();
+        if (closed > 0) console.log(`🕳️  Gaps closed by history sync: ${closed}`);
+      } catch (e) {
+        console.error(`Gap review failed: ${(e as Error).message}`);
+      }
+    }, GAP_REVIEW_DEBOUNCE_MS);
+    gapReviewTimer.unref?.();
   });
 
   // ── REST API ───────────────────────────────────────────────

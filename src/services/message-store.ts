@@ -153,6 +153,14 @@ export class MessageStore {
   get(jid: string): proto.IWebMessageInfo[] {
     const direct = this.messages.get(jid);
     if (direct?.length) return direct;
+    // buffer() files @lid traffic under the phone JID once the pairing is
+    // known, so a lookup BY lid has to follow the same mapping — otherwise a
+    // caller holding only a lid (gap rows, for one) sees an empty chat.
+    const phone = this.lidToJid.get(jid);
+    if (phone) {
+      const viaPhone = this.messages.get(phone);
+      if (viaPhone?.length) return viaPhone;
+    }
     const lid = this.jidToLid.get(jid);
     if (lid) return this.messages.get(lid) ?? [];
     return [];
