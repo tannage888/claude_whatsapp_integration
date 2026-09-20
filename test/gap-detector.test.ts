@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { StateDb } from "../src/services/state-db.js";
 import { MessageStore } from "../src/services/message-store.js";
-import { GapDetector } from "../src/services/gap-detector.js";
+import { GapDetector, NO_EVIDENCE_NOTE } from "../src/services/gap-detector.js";
 import { createApiRouter } from "../src/routes/api.js";
 import type { WhatsAppConnection } from "../src/services/whatsapp.js";
 import type { WASocket } from "@whiskeysockets/baileys";
@@ -199,5 +199,111 @@ describe("Phase 8: Gap detection + history backfill", () => {
     detector.touchChat(JID);
     const chat = db.getChat(JID);
     expect(chat!.lastSeenByDaemonAt).toBeGreaterThan(1000);
+  });
+
+  describe("settleQuietGaps", () => {
+    it("closes an uncovered gateway_offline gap as unrecovered, not as a success", () => {
+      const gapFrom = Date.now() - 120_000;
+      db.upsertChat({ jid: JID, isGroup: false, lastSeenByDaemonAt: gapFrom });
+
+      const detector = new GapDetector(db, store);
+      detector.detect();
+      expect(db.listGaps(true)).toHaveLength(1);
+
+      // History sync completed and brought nothing for this chat.
+      expect(detector.settleQuietGaps()).toBe(1);
+
+      const gap = db.listGaps()[0];
+      expect(gap.resolvedAt).not.toBeNull();
+      expect(gap.notes).toBe(NO_EVIDENCE_NOTE);
+      // Nothing was recovered, so the success flag must not claim otherwise.
+      expect(gap.backfillSucceeded).toBe(false);
+    });
+
+    it("leaves decrypt_failure gaps open — those messages are known to have existed", () => {
+      db.recordGap({
+        chatJid: JID, fromTs: Date.now() - 120_000, toTs: Date.now() - 60_000,
+        reason: "decrypt_failure", backfillAttempted: false, backfillSucceeded: false,
+      });
+
+      expect(new GapDetector(db, store).settleQuietGaps()).toBe(0);
+      expect(db.listGaps(true)).toHaveLength(1);
+    });
+
+    it("leaves a covered gap for reviewOpenGaps to close as recovered", () => {
+      const gapFrom = Date.now() - 120_000;
+      db.upsertChat({ jid: JID, isGroup: false, lastSeenByDaemonAt: gapFrom });
+
+      const detector = new GapDetector(db, store);
+      detector.detect();
+      store.buffer([message(gapFrom + 60_000)] as never);
+
+      expect(detector.settleQuietGaps()).toBe(0);
+      expect(detector.reviewOpenGaps()).toBe(1);
+      expect(db.listGaps()[0].backfillSucceeded).toBe(true);
+    });
+
+    it("is idempotent — a settled gap is not counted again", () => {
+      db.upsertChat({ jid: JID, isGroup: false, lastSeenByDaemonAt: Date.now() - 120_000 });
+      const detector = new GapDetector(db, store);
+      detector.detect();
+
+      expect(detector.settleQuietGaps()).toBe(1);
+      expect(detector.settleQuietGaps()).toBe(0);
+    });
+
+    it("clears the per-restart backlog a quiet chat accumulates", () => {
+      // One unclosable row per daemon start is what buries the real gaps.
+      for (let i = 5; i > 0; i--) {
+        db.recordGap({
+          chatJid: JID, fromTs: Date.now() - i * 60_000, toTs: Date.now() - (i - 1) * 60_000,
+          reason: "gateway_offline", backfillAttempted: false, backfillSucceeded: false,
+        });
+      }
+      db.recordGap({
+        chatJid: GROUP_JID, fromTs: Date.now() - 60_000, toTs: Date.now(),
+        reason: "decrypt_failure", backfillAttempted: false, backfillSucceeded: false,
+      });
+
+      expect(new GapDetector(db, store).settleQuietGaps()).toBe(5);
+
+      const open = db.listGaps(true);
+      expect(open).toHaveLength(1);
+      expect(open[0].reason).toBe("decrypt_failure");
+    });
+  });
+
+  describe("GET /api/gaps summary", () => {
+    it("breaks unresolved gaps down by reason", async () => {
+      db.recordGap({ chatJid: JID, fromTs: 1000, toTs: 2000, reason: "gateway_offline", backfillAttempted: false, backfillSucceeded: false });
+      db.recordGap({ chatJid: JID, fromTs: 3000, toTs: 4000, reason: "decrypt_failure", backfillAttempted: false, backfillSucceeded: false });
+      const resolved = db.recordGap({ chatJid: JID, fromTs: 5000, toTs: 6000, reason: "gateway_offline", backfillAttempted: true, backfillSucceeded: true });
+      db.resolveGap(resolved);
+
+      const res = await request(buildApp(db, store)).get("/api/gaps");
+
+      expect(res.status).toBe(200);
+      expect(res.body.gaps).toHaveLength(3);
+      expect(res.body.summary).toEqual({
+        total: 3,
+        unresolved: 2,
+        resolved: 1,
+        unresolvedByReason: { gateway_offline: 1, decrypt_failure: 1 },
+      });
+    });
+
+    it("?unresolved=true returns only open gaps, with the summary still counting all", async () => {
+      db.recordGap({ chatJid: JID, fromTs: 1000, toTs: 2000, reason: "decrypt_failure", backfillAttempted: false, backfillSucceeded: false });
+      const resolved = db.recordGap({ chatJid: JID, fromTs: 3000, toTs: 4000, reason: "gateway_offline", backfillAttempted: true, backfillSucceeded: true });
+      db.resolveGap(resolved);
+
+      const res = await request(buildApp(db, store)).get("/api/gaps?unresolved=true");
+
+      expect(res.status).toBe(200);
+      expect(res.body.gaps).toHaveLength(1);
+      expect(res.body.gaps[0].reason).toBe("decrypt_failure");
+      expect(res.body.summary.total).toBe(2);
+      expect(res.body.summary.unresolved).toBe(1);
+    });
   });
 });

@@ -3,6 +3,13 @@ import type { MessageStore } from "./message-store.js";
 
 const GAP_THRESHOLD_MS = 60_000; // 60 seconds
 
+/**
+ * Written to `notes` when a gap is closed because the history sync completed
+ * and brought nothing for that chat. It records the absence of evidence, not
+ * a recovery — see `settleQuietGaps`.
+ */
+export const NO_EVIDENCE_NOTE = "no evidence of missed traffic";
+
 export interface GapDetectionResult {
   gapsRecorded: number;
   alreadyCovered: number;
@@ -83,6 +90,43 @@ export class GapDetector {
     }
 
     return closed;
+  }
+
+  /**
+   * Close the gaps that a completed history sync has answered in the negative.
+   *
+   * `detect` cannot tell a chat that lost messages from one that simply had
+   * nothing to say — at startup neither has anything in the window. So it
+   * records a gap for every unwatched chat and lets the evidence decide. For a
+   * chat that stayed silent the evidence never comes, and the row sits open for
+   * ever; at one row per chat per restart that residue becomes the whole table
+   * and buries the gaps that do mean something.
+   *
+   * Once WhatsApp reports the sync complete (`isLatest`), silence is an answer:
+   * we asked for the window and were given nothing for that chat. Close those
+   * rows, noting that this records an absence of evidence rather than a
+   * recovery — `backfillSucceeded` stays false because nothing was recovered.
+   *
+   * `decrypt_failure` gaps are deliberately left open. Those messages arrived
+   * and could not be read, so their absence from the store is positive evidence
+   * of loss, and no amount of history sync makes that untrue.
+   *
+   * Call after `reviewOpenGaps`, which claims the gaps that history did cover.
+   */
+  settleQuietGaps(): number {
+    let settled = 0;
+
+    for (const gap of this.db.listGaps(true)) {
+      if (gap.reason !== "gateway_offline") continue;
+      // Leave covered gaps to reviewOpenGaps — those were genuinely recovered.
+      if (gap.chatJid && this.isCovered(gap.chatJid, gap.fromTs, gap.toTs)) continue;
+
+      this.db.updateGap(gap.id, { backfillAttempted: true, notes: NO_EVIDENCE_NOTE });
+      this.db.resolveGap(gap.id);
+      settled++;
+    }
+
+    return settled;
   }
 
   /** Does the store hold a message inside (fromMs, toMs] for this chat? */

@@ -147,13 +147,24 @@ async function main(): Promise<void> {
   // opens; each one can close an open gap. Re-check on the trailing edge so a
   // burst of batches costs one pass rather than one per batch.
   let gapReviewTimer: ReturnType<typeof setTimeout> | null = null;
-  wa.on("history:set", () => {
+  let historySyncComplete = false;
+  wa.on("history:set", ({ isLatest }: { count: number; isLatest: boolean }) => {
+    // isLatest marks the final batch: past it, a chat with nothing in its gap
+    // window was not missed, it was quiet. Sticky, because the batches after
+    // it (and later reconnects) are still worth reviewing.
+    if (isLatest) historySyncComplete = true;
     if (gapReviewTimer) clearTimeout(gapReviewTimer);
     gapReviewTimer = setTimeout(() => {
       gapReviewTimer = null;
       try {
         const closed = gapDetector.reviewOpenGaps();
         if (closed > 0) console.log(`🕳️  Gaps closed by history sync: ${closed}`);
+        // Order matters: reviewOpenGaps claims the gaps history covered, and
+        // whatever is still open after it is the silence.
+        if (historySyncComplete) {
+          const settled = gapDetector.settleQuietGaps();
+          if (settled > 0) console.log(`🕳️  Gaps closed as quiet (no evidence of missed traffic): ${settled}`);
+        }
       } catch (e) {
         console.error(`Gap review failed: ${(e as Error).message}`);
       }
