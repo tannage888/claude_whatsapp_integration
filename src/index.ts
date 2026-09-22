@@ -9,11 +9,11 @@ import { ContactContextScraper } from "./services/contact-context-scraper.js";
 import { ZipAutoDetector } from "./services/zip-auto-detector.js";
 import { KitClient } from "./services/kit-client.js";
 import { GapDetector } from "./services/gap-detector.js";
+import { GapReviewScheduler } from "./services/gap-review-scheduler.js";
 import { SessionHealth } from "./services/session-health.js";
 import type { proto } from "@whiskeysockets/baileys";
 
 const VERSION = "0.1.0";
-const GAP_REVIEW_DEBOUNCE_MS = 5_000;
 
 async function main(): Promise<void> {
   const startedAt = Date.now();
@@ -143,33 +143,16 @@ async function main(): Promise<void> {
     }
   });
 
-  // Reconnect history arrives in batches over the seconds after the socket
-  // opens; each one can close an open gap. Re-check on the trailing edge so a
-  // burst of batches costs one pass rather than one per batch.
-  let gapReviewTimer: ReturnType<typeof setTimeout> | null = null;
-  let historySyncComplete = false;
+  // Connecting drives the review, not history: WhatsApp only sends history on
+  // the initial sync at pairing, so on an ordinary restart no batch arrives and
+  // a history-driven review would never run at all.
+  const gapReview = new GapReviewScheduler(gapDetector, {
+    log: (message) => console.log(message),
+  });
+
+  wa.on("connection:open", () => gapReview.onConnectionOpen());
   wa.on("history:set", ({ isLatest }: { count: number; isLatest: boolean }) => {
-    // isLatest marks the final batch: past it, a chat with nothing in its gap
-    // window was not missed, it was quiet. Sticky, because the batches after
-    // it (and later reconnects) are still worth reviewing.
-    if (isLatest) historySyncComplete = true;
-    if (gapReviewTimer) clearTimeout(gapReviewTimer);
-    gapReviewTimer = setTimeout(() => {
-      gapReviewTimer = null;
-      try {
-        const closed = gapDetector.reviewOpenGaps();
-        if (closed > 0) console.log(`🕳️  Gaps closed by history sync: ${closed}`);
-        // Order matters: reviewOpenGaps claims the gaps history covered, and
-        // whatever is still open after it is the silence.
-        if (historySyncComplete) {
-          const settled = gapDetector.settleQuietGaps();
-          if (settled > 0) console.log(`🕳️  Gaps closed as quiet (no evidence of missed traffic): ${settled}`);
-        }
-      } catch (e) {
-        console.error(`Gap review failed: ${(e as Error).message}`);
-      }
-    }, GAP_REVIEW_DEBOUNCE_MS);
-    gapReviewTimer.unref?.();
+    gapReview.onHistoryBatch(isLatest);
   });
 
   // ── REST API ───────────────────────────────────────────────
@@ -206,6 +189,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`${signal} received — shutting down`);
     membership.stopScheduledRefresh();
+    gapReview.stop();
     await wa.disconnect();
     process.exit(0);
   };
