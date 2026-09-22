@@ -5,7 +5,7 @@ owner: mark
 status: done
 priority: 1
 created: 2026-04-19
-last_reviewed: 2026-05-14
+last_reviewed: 2026-09-22
 
 permissions: bypassPermissions
 max_concurrent_agents: 1

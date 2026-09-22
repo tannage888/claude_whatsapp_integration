@@ -1,111 +1,88 @@
 # Status — Claude WhatsApp Integration
 
-**As of:** 2026-05-14
-**Stage:** `production_deploy`
+**As of:** 2026-09-22
+**Stage:** `done` — running in production under pm2
 
-## What's done
+## What's running
 
-All 15 implementation phases complete, plus:
-- Auth, message capture, SQLite state DB, read endpoints, no-read list
-- Send, membership, gap detection + backfill, phone-export importer
-- CLI, production hardening, end-to-end smoke test
-- Contact context scraper (Phase 13), ZIP export ingestion (Phase 14)
-- `GET /api/groups` endpoint (groupFetchAllParticipating, participants in E164)
+All 15 implementation phases complete, plus contact context scraping (Phase 13),
+ZIP export ingestion (Phase 14), `GET /api/groups`, @lid identity resolution,
+full-history sync on pairing, and the gap detection/recovery work below.
 
-160 tests passing, zero TypeScript errors.
+**226 tests, zero TypeScript errors.**
 
-Manual acceptance complete (2026-05-11): all critical API endpoints verified
-against live WhatsApp account (+447879648011). See `MANUAL_VERIFICATION.md`.
+Live under pm2 as `kit-daemon` on `:3142`, alongside Kit's `kit-gateway` on
+`:3141`.
 
-Known issues (non-blocking):
-- `DELETE /api/auth` returns EPERM on Windows while daemon is running
+## Process management — settled
+
+pm2 is the process manager. An earlier attempt to register an NSSM service or a
+standalone Task Scheduler entry is **abandoned, not outstanding** — the notes
+below used to describe it as blocked on an elevated shell, which was stale.
+
+Auto-start on boot is in place and verified:
+
+- `start-kit-pm2.vbs` in the user Startup folder
+- Scheduled tasks `KitGateway` and `WhatsAppDaemon` (note: no space in the name)
+- `~/.pm2/dump.pm2` saved
+
+Verified 2026-09-22: machine booted 08:01, daemon was up and connected by 08:06
+without intervention.
+
+## Live capture — enabled 2026-09-22
+
+`WA_INCOMING_HOOK_URL=http://127.0.0.1:3141/api/incoming-message` is now set in
+`.env`. Until today it was unset, so the hook block in `src/index.ts` never ran
+and Kit's `MessageRouter` was driven only by the 3-hourly sweep. Live capture
+now fires on each inbound message.
+
+## Gap detection and recovery
+
+Four fixes, merged in [#4](https://github.com/tannage888/claude_whatsapp_integration/pull/4)
+and pending in [#5](https://github.com/tannage888/claude_whatsapp_integration/pull/5):
+
+1. **Session health** — a broken Signal session made a chat indistinguishable
+   from a quiet one; CIPHERTEXT stubs were discarded in silence. One contact
+   lost eight weeks of conversation that way. Now detected and the session
+   deleted so the next message renegotiates.
+2. **History fetch contract** — `fetchMessageHistory` takes
+   `(count, oldestMsgKey, oldestMsgTimestamp)` and returns a request-session id;
+   the messages arrive later on `messaging-history.set`. Both call sites passed
+   `(chatJid, cursor, pageSize)` and awaited a `{ messages, cursor }` object
+   that does not exist. `HistoryFetcher` now correlates the deferred batch.
+3. **Quiet-gap classification** — `detect()` cannot tell a chat that lost
+   messages from one that stayed silent, so it records a gap for every unwatched
+   chat and lets evidence decide. Silent chats never produce evidence, so their
+   rows accumulated one per restart until they buried the real losses.
+   `settleQuietGaps` closes them once history is complete, recording absence of
+   evidence rather than a recovery.
+4. **Running at all** — the review hung off `messaging-history.set`, which only
+   fires on the initial sync at pairing. On an ordinary restart no batch arrived
+   and neither pass ever ran; both earlier fixes were dead code in production.
+   `GapReviewScheduler` now drives it from `connection:open` with a 60s settle
+   deadline.
+
+**Verified live, 2026-09-22.** On restart the daemon logged, for the first time
+in 28 restarts:
+
+```
+🕳️  Gaps detected: 86 (30 already covered)
+🕳️  Gaps closed by history sync: 87
+🕳️  Gaps closed as quiet (no evidence of missed traffic): 1473
+```
+
+`/api/gaps` went from **1,571 unresolved to 11**, all `decrypt_failure` — real,
+unrecovered loss, which is now the entire open set rather than 0.7% of it.
+
+## Known issues (non-blocking)
+
+- `DELETE /api/auth` returns EPERM on Windows while the daemon is running
 - Group participants empty in multi-device mode (@lid JIDs filtered by design)
+- `detect()` runs on first connect only (`wa.once`), so a mid-session reconnect
+  after a long drop records no gap for that window
 
-## Production deployment — Task Scheduler setup
+## What's next
 
-`scripts\start-daemon.bat` created (2026-05-11). Registers the daemon to run
-at logon and redirects output to `logs\daemon.log`.
-
-Task Scheduler registration blocked by OS permissions (access denied even for
-current user). Human must complete registration with admin rights:
-
-```powershell
-# Run in an elevated (Run as Administrator) PowerShell:
-$batPath = "C:\dev\claude_whatsapp_integration\scripts\start-daemon.bat"
-$action = New-ScheduledTaskAction -Execute $batPath
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "WhatsApp Daemon" -Action $action -Trigger $trigger -Settings $settings -Description "Claude WhatsApp Integration daemon"
-# Verify:
-Start-ScheduledTask -TaskName "WhatsApp Daemon"
-Invoke-RestMethod http://localhost:3100/api/status
-```
-
-After registering, reboot and confirm `GET http://localhost:3100/api/status`
-responds before marking complete.
-
-## Production deployment — NSSM attempt (2026-05-14)
-
-NSSM installed via Scoop (`scoop install nssm` → `C:\Users\seang\scoop\shims\nssm.exe`).
-
-`nssm install "WhatsAppDaemon" ...` failed with:
-
-```
-Administrator access is needed to install a service.
-```
-
-Both Task Scheduler registration (previous attempt) and NSSM service installation
-require an elevated shell. This is a Windows security boundary that cannot be
-crossed from a non-elevated process.
-
-## Re-dispatch note (2026-05-14)
-
-Multiple Orchestra dispatches (2nd and 3rd) confirmed the same result: both
-Task Scheduler registration and `nssm install` fail with the same message:
-
-```
-Administrator access is needed to install a service.
-```
-
-No code change can bypass this. Human action required. Status set to `paused`
-to stop further automatic re-dispatching.
-
-## What's next — human action required
-
-Run **one** of the following in an **elevated (Run as Administrator)** terminal:
-
-### Option A — NSSM service (recommended, survives reboot without login)
-
-```powershell
-# 1. Install NSSM if not already present
-scoop install nssm   # or: winget install nssm
-
-# 2. Register the service
-nssm install WhatsAppDaemon "C:\dev\claude_whatsapp_integration\scripts\start-daemon.bat"
-nssm set WhatsAppDaemon AppDirectory "C:\dev\claude_whatsapp_integration"
-nssm set WhatsAppDaemon AppStdout "C:\dev\claude_whatsapp_integration\logs\daemon.log"
-nssm set WhatsAppDaemon AppStderr "C:\dev\claude_whatsapp_integration\logs\daemon.log"
-nssm set WhatsAppDaemon Start SERVICE_AUTO_START
-
-# 3. Start it
-nssm start WhatsAppDaemon
-
-# 4. Verify
-Invoke-RestMethod http://localhost:3100/api/status
-```
-
-### Option B — Task Scheduler (runs only when logged in)
-
-```powershell
-# Run in elevated PowerShell:
-$batPath = "C:\dev\claude_whatsapp_integration\scripts\start-daemon.bat"
-$action = New-ScheduledTaskAction -Execute $batPath
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "WhatsApp Daemon" -Action $action -Trigger $trigger -Settings $settings -Description "Claude WhatsApp Integration daemon"
-Start-ScheduledTask -TaskName "WhatsApp Daemon"
-Invoke-RestMethod http://localhost:3100/api/status
-```
-
-After registering with either option, reboot and confirm `GET http://localhost:3100/api/status`
-responds. Project is then fully complete.
+- **Merge [#5](https://github.com/tannage888/claude_whatsapp_integration/pull/5)** —
+  the branch is what the daemon actually runs from the working tree, so `main`
+  is behind the running code until it lands
