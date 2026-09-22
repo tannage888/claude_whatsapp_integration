@@ -12,6 +12,7 @@ import { importPhoneExport } from "../services/phone-export-importer.js";
 import { importZipExport, ZipImportError } from "../services/zip-export-importer.js";
 import type { ContactContextScraper } from "../services/contact-context-scraper.js";
 import type { KitClient } from "../services/kit-client.js";
+import type { SessionHealth } from "../services/session-health.js";
 import multer from "multer";
 
 interface RouterDeps {
@@ -25,6 +26,7 @@ interface RouterDeps {
   contextScraper?: ContactContextScraper;
   authStatePath?: string;
   kit?: KitClient;
+  sessionHealth?: SessionHealth;
 }
 
 const ScrapeContextBody = z.object({
@@ -77,6 +79,18 @@ export function createApiRouter(deps: RouterDeps): Router {
     return res.json({ ok: true });
   });
 
+  router.get("/health/sessions", (_req, res) => {
+    const sh = deps.sessionHealth;
+    if (!sh) return res.status(503).json({ error: "session_health_not_initialised" });
+    const broken = sh.broken();
+    return res.json({
+      healthy: broken.length === 0,
+      brokenCount: broken.length,
+      broken,
+      tracked: sh.report(),
+    });
+  });
+
   // ── Chats / Read ──────────────────────────────────────────
 
   router.get("/chats", (_req, res) => {
@@ -120,11 +134,35 @@ export function createApiRouter(deps: RouterDeps): Router {
 
   // ── Gaps ─────────────────────────────────────────────────
 
-  router.get("/gaps", (_req, res) => {
+  // A caller asking "did I lose anything?" needs the reason breakdown more
+  // than the rows: an unresolved decrypt_failure is known loss, while an
+  // unresolved gateway_offline is only a window nothing has spoken for yet.
+  // ?unresolved=true drops the settled rows, which are the bulk of the table.
+  router.get("/gaps", (req, res) => {
     const db = deps.db;
     if (!db) return res.status(503).json({ error: "db_not_initialised" });
-    const gaps = db.listGaps();
-    return res.json({ gaps });
+
+    const unresolvedOnly = req.query.unresolved === "true";
+    const gaps = db.listGaps(unresolvedOnly);
+    const all = unresolvedOnly ? db.listGaps() : gaps;
+
+    const unresolvedByReason: Record<string, number> = {};
+    let unresolved = 0;
+    for (const gap of all) {
+      if (gap.resolvedAt !== null) continue;
+      unresolved++;
+      unresolvedByReason[gap.reason] = (unresolvedByReason[gap.reason] ?? 0) + 1;
+    }
+
+    return res.json({
+      gaps,
+      summary: {
+        total: all.length,
+        unresolved,
+        resolved: all.length - unresolved,
+        unresolvedByReason,
+      },
+    });
   });
 
   router.post("/gaps/:id/resolve", (req, res) => {

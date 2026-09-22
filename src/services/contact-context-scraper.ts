@@ -1,5 +1,6 @@
-import type { proto, WASocket } from "@whiskeysockets/baileys";
+import type { WASocket } from "@whiskeysockets/baileys";
 import type { MessageStore } from "./message-store.js";
+import { HistoryFetcher, oldestAnchor } from "./history-fetcher.js";
 import type { StateDb } from "./state-db.js";
 import type { MembershipService } from "./membership.js";
 import { resolveIdentifier } from "../utils/jid.js";
@@ -17,6 +18,12 @@ export interface ScrapedChat {
   displayName: string | null;
   type: "individual" | "group";
   messagesBackfilled: number;
+  /**
+   * Set when the chat was not requested at all. WhatsApp pages history
+   * backwards from a message key, so a chat with nothing stored has no cursor
+   * to reach back from — which is not the same as a chat with no history.
+   */
+  skipped?: "no-anchor";
 }
 
 export interface ScrapeContextResult {
@@ -28,12 +35,17 @@ export interface ScrapeContextResult {
 }
 
 export class ContactContextScraper {
+  private readonly history: HistoryFetcher;
+
   constructor(
     private readonly db: StateDb,
     private readonly store: MessageStore,
     private readonly membership: MembershipService,
-    private readonly getSocket: () => WASocket | null
-  ) {}
+    private readonly getSocket: () => WASocket | null,
+    history?: HistoryFetcher
+  ) {
+    this.history = history ?? new HistoryFetcher(getSocket);
+  }
 
   async scrape(identifier: string, opts: ScrapeContextOptions = {}): Promise<ScrapeContextResult> {
     const maxPerChat = opts.maxMessagesPerChat ?? DEFAULT_MAX_MESSAGES_PER_CHAT;
@@ -72,14 +84,15 @@ export class ContactContextScraper {
     }
 
     for (const chat of allChats) {
-      const count = await this.backfillChat(chat.chatJid, maxPerChat, sinceMs);
+      const { fetched, skipped } = await this.backfillChat(chat.chatJid, maxPerChat, sinceMs);
       results.push({
         jid: chat.chatJid,
         displayName: chat.displayName,
         type: chat.type,
-        messagesBackfilled: count,
+        messagesBackfilled: fetched,
+        ...(skipped ? { skipped } : {}),
       });
-      totalBackfilled += count;
+      totalBackfilled += fetched;
     }
 
     return {
@@ -91,46 +104,52 @@ export class ContactContextScraper {
     };
   }
 
-  private async backfillChat(chatJid: string, maxMessages: number, sinceMs: number | undefined): Promise<number> {
-    const socket = this.getSocket();
-    if (!socket) return 0;
+  /**
+   * Page backwards through a chat's history, anchoring each request on the
+   * oldest message held so far.
+   *
+   * The messages are counted, not stored: WhatsAppConnection's
+   * `messaging-history.set` handler already buffers every batch, and
+   * MessageStore.buffer does not deduplicate.
+   */
+  /**
+   * Page backwards through a chat's history, anchoring each request on the
+   * oldest message held so far.
+   *
+   * The messages are counted, not stored: WhatsAppConnection's
+   * `messaging-history.set` handler already buffers every batch, and
+   * MessageStore.buffer does not deduplicate.
+   */
+  private async backfillChat(
+    chatJid: string,
+    maxMessages: number,
+    sinceMs: number | undefined
+  ): Promise<{ fetched: number; skipped?: "no-anchor" }> {
+    if (!this.getSocket()) return { fetched: 0 };
 
     const sinceSec = sinceMs !== undefined ? Math.floor(sinceMs / 1000) : undefined;
     let fetched = 0;
-    let cursor: string | null = null;
 
     try {
       while (fetched < maxMessages) {
-        const remaining = maxMessages - fetched;
-        const batchSize = Math.min(PAGE_SIZE, remaining);
+        // Re-read after every batch: the anchor for the next request is the
+        // oldest message the batch just added to the store.
+        const anchor = oldestAnchor(this.store.get(chatJid));
+        if (!anchor) return { fetched, ...(fetched === 0 ? { skipped: "no-anchor" as const } : {}) };
+        if (sinceSec !== undefined && anchor.timestampSec < sinceSec) break;
 
-        const result: { messages?: proto.IWebMessageInfo[]; cursor?: string | null } | null = await (socket as any).fetchMessageHistory(
-          chatJid,
-          cursor,
-          batchSize
-        );
+        const batchSize = Math.min(PAGE_SIZE, maxMessages - fetched);
+        const batch = await this.history.fetchOlderThan(anchor, batchSize);
 
-        if (!result) break;
-        const messages = result.messages ?? [];
-        if (messages.length === 0) break;
-
-        this.store.buffer(messages);
-        fetched += messages.length;
-        cursor = result.cursor ?? null;
-
-        // Stop if we've gone past the `since` floor
-        if (sinceSec !== undefined) {
-          const oldest = messages[messages.length - 1];
-          const oldestTs = Number(oldest?.messageTimestamp ?? 0);
-          if (oldestTs && oldestTs < sinceSec) break;
-        }
-
-        if (!cursor) break;
+        if (batch.messages.length === 0) break;
+        fetched += batch.messages.length;
+        if (batch.isLatest) break;
       }
     } catch {
-      return fetched;
+      // A single unreachable chat must not abort the whole scrape.
+      return { fetched };
     }
 
-    return fetched;
+    return { fetched };
   }
 }

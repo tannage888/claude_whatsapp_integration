@@ -8,6 +8,7 @@ import { StateDb } from "../src/services/state-db.js";
 import { MessageStore } from "../src/services/message-store.js";
 import { MembershipService } from "../src/services/membership.js";
 import { ContactContextScraper } from "../src/services/contact-context-scraper.js";
+import type { HistoryBatch, HistoryFetcher } from "../src/services/history-fetcher.js";
 import { createApiRouter } from "../src/routes/api.js";
 import type { WhatsAppConnection } from "../src/services/whatsapp.js";
 import type { WASocket } from "@whiskeysockets/baileys";
@@ -29,19 +30,35 @@ describe("Phase 13: Contact context scraper", () => {
   let db: StateDb;
   let store: MessageStore;
   let tmpDir: string;
-  let fetchMessageHistoryMock: ReturnType<typeof vi.fn>;
+  let historyMock: ReturnType<typeof vi.fn>;
   let groupFetchMock: ReturnType<typeof vi.fn>;
   let mockSocket: Partial<WASocket>;
+
+  /**
+   * Stands in for HistoryFetcher. Batches are buffered into the store exactly
+   * as WhatsAppConnection's `messaging-history.set` handler does in production
+   * — the scraper itself never stores, it only counts.
+   */
+  function batch(messages: ReturnType<typeof makeMsg>[], isLatest = false): HistoryBatch {
+    store.buffer(messages as never);
+    return { messages: messages as never, isLatest, timedOut: false };
+  }
+
+  function emptyBatch(isLatest = true): HistoryBatch {
+    return { messages: [], isLatest, timedOut: false };
+  }
+
+  function historyFetcher(): HistoryFetcher {
+    return { fetchOlderThan: historyMock } as unknown as HistoryFetcher;
+  }
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "wa-scraper-test-"));
     db = new StateDb(":memory:");
     store = new MessageStore(path.join(tmpDir, "store.json"));
-    fetchMessageHistoryMock = vi.fn();
+    historyMock = vi.fn().mockResolvedValue({ messages: [], isLatest: true, timedOut: false });
     groupFetchMock = vi.fn().mockResolvedValue({});
     mockSocket = {
-      // @ts-expect-error fetchMessageHistory is not in the official types but exists at runtime
-      fetchMessageHistory: fetchMessageHistoryMock,
       groupFetchAllParticipating: groupFetchMock,
     } as unknown as Partial<WASocket>;
   });
@@ -53,12 +70,22 @@ describe("Phase 13: Contact context scraper", () => {
 
   function buildScraper(): { scraper: ContactContextScraper; membership: MembershipService } {
     const membership = new MembershipService(db, () => mockSocket as WASocket);
-    const scraper = new ContactContextScraper(db, store, membership, () => mockSocket as WASocket);
+    const scraper = new ContactContextScraper(
+      db,
+      store,
+      membership,
+      () => mockSocket as WASocket,
+      historyFetcher()
+    );
     return { scraper, membership };
   }
 
+  /** Seed one stored message so the chat has an anchor to page back from. */
+  function seedAnchor(jid: string, tsSec = Math.floor(Date.now() / 1000)) {
+    store.buffer([makeMsg(jid, tsSec, "seed", `seed-${jid}`)] as never);
+  }
+
   it("resolves identifier (E164) to JID and includes direct chat", async () => {
-    fetchMessageHistoryMock.mockResolvedValue({ messages: [], cursor: null });
     const { scraper } = buildScraper();
 
     const result = await scraper.scrape(CONTACT_E164);
@@ -72,22 +99,61 @@ describe("Phase 13: Contact context scraper", () => {
     db.upsertChatMember({ chatJid: GROUP_JID_B, participantJid: CONTACT_JID, displayName: "Alice", lastVerifiedAt: Date.now() });
 
     const nowSec = Math.floor(Date.now() / 1000);
-    fetchMessageHistoryMock.mockImplementation((jid: string) => {
-      if (jid === GROUP_JID_A) return Promise.resolve({ messages: [makeMsg(jid, nowSec, "hi from A", "m1")], cursor: null });
-      if (jid === GROUP_JID_B) return Promise.resolve({ messages: [makeMsg(jid, nowSec, "hi from B", "m2"), makeMsg(jid, nowSec - 10, "older", "m3")], cursor: null });
-      return Promise.resolve({ messages: [], cursor: null });
+    seedAnchor(GROUP_JID_A, nowSec);
+    seedAnchor(GROUP_JID_B, nowSec);
+
+    historyMock.mockImplementation((anchor: { key: { remoteJid: string } }) => {
+      const jid = anchor.key.remoteJid;
+      if (jid === GROUP_JID_A) {
+        return Promise.resolve(batch([makeMsg(jid, nowSec - 100, "hi from A", "m1")], true));
+      }
+      if (jid === GROUP_JID_B) {
+        return Promise.resolve(
+          batch([makeMsg(jid, nowSec - 100, "hi from B", "m2"), makeMsg(jid, nowSec - 110, "older", "m3")], true)
+        );
+      }
+      return Promise.resolve(emptyBatch());
     });
 
     const { scraper } = buildScraper();
     const result = await scraper.scrape(CONTACT_E164);
 
-    const aChat = result.chats.find((c) => c.jid === GROUP_JID_A);
-    const bChat = result.chats.find((c) => c.jid === GROUP_JID_B);
-    expect(aChat?.messagesBackfilled).toBe(1);
-    expect(bChat?.messagesBackfilled).toBe(2);
+    expect(result.chats.find((c) => c.jid === GROUP_JID_A)?.messagesBackfilled).toBe(1);
+    expect(result.chats.find((c) => c.jid === GROUP_JID_B)?.messagesBackfilled).toBe(2);
     expect(result.totalMessagesBackfilled).toBeGreaterThanOrEqual(3);
-    expect(store.get(GROUP_JID_A)).toHaveLength(1);
-    expect(store.get(GROUP_JID_B)).toHaveLength(2);
+  });
+
+  it("anchors each request on the oldest message held for the chat", async () => {
+    db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    store.buffer([
+      makeMsg(GROUP_JID_A, nowSec, "newest", "new"),
+      makeMsg(GROUP_JID_A, nowSec - 500, "oldest", "old"),
+    ] as never);
+    historyMock.mockResolvedValue(emptyBatch());
+
+    const { scraper } = buildScraper();
+    await scraper.scrape(CONTACT_E164);
+
+    const call = historyMock.mock.calls.find((c) => c[0].key.remoteJid === GROUP_JID_A);
+    expect(call?.[0].key.id).toBe("old");
+    expect(call?.[0].timestampSec).toBe(nowSec - 500);
+    // The count is the second argument, mirroring Baileys'
+    // fetchMessageHistory(count, oldestMsgKey, oldestMsgTimestamp).
+    expect(call?.[1]).toBe(50);
+  });
+
+  it("skips a chat with nothing stored — there is no cursor to page back from", async () => {
+    db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
+
+    const { scraper } = buildScraper();
+    const result = await scraper.scrape(CONTACT_E164);
+
+    const a = result.chats.find((c) => c.jid === GROUP_JID_A);
+    expect(a?.messagesBackfilled).toBe(0);
+    expect(a?.skipped).toBe("no-anchor");
+    expect(historyMock).not.toHaveBeenCalled();
   });
 
   it("triggers membership.refresh() when cache is empty", async () => {
@@ -98,7 +164,6 @@ describe("Phase 13: Contact context scraper", () => {
         participants: [{ id: CONTACT_JID }, { id: "447700900124@s.whatsapp.net" }],
       },
     });
-    fetchMessageHistoryMock.mockResolvedValue({ messages: [], cursor: null });
 
     const { scraper } = buildScraper();
     const result = await scraper.scrape(CONTACT_E164);
@@ -108,24 +173,48 @@ describe("Phase 13: Contact context scraper", () => {
     expect(result.chats.some((c) => c.jid === GROUP_JID_A)).toBe(true);
   });
 
-  it("paginates using cursor and stops when cap reached", async () => {
+  it("paginates backwards and stops when the cap is reached", async () => {
     db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
 
     const nowSec = Math.floor(Date.now() / 1000);
-    const makeBatch = (prefix: string, start: number, count: number) =>
-      Array.from({ length: count }, (_, i) => makeMsg(GROUP_JID_A, nowSec - (start + i), `msg-${prefix}-${i}`, `${prefix}${i}`));
+    seedAnchor(GROUP_JID_A, nowSec);
 
-    fetchMessageHistoryMock
-      .mockResolvedValueOnce({ messages: makeBatch("A", 0, 50), cursor: "cur1" })
-      .mockResolvedValueOnce({ messages: makeBatch("B", 50, 50), cursor: "cur2" })
-      .mockResolvedValueOnce({ messages: makeBatch("C", 100, 50), cursor: null });
+    let page = 0;
+    historyMock.mockImplementation(() => {
+      const start = 100 + page * 50;
+      page++;
+      return Promise.resolve(
+        batch(
+          Array.from({ length: 50 }, (_, i) =>
+            makeMsg(GROUP_JID_A, nowSec - (start + i), "msg", `p${page}-${i}`)
+          )
+        )
+      );
+    });
 
     const { scraper } = buildScraper();
     const result = await scraper.scrape(CONTACT_E164, { maxMessagesPerChat: 100 });
 
-    const a = result.chats.find((c) => c.jid === GROUP_JID_A);
-    expect(a?.messagesBackfilled).toBe(100);
-    expect(fetchMessageHistoryMock.mock.calls.filter((call) => call[0] === GROUP_JID_A)).toHaveLength(2);
+    expect(result.chats.find((c) => c.jid === GROUP_JID_A)?.messagesBackfilled).toBe(100);
+    expect(historyMock.mock.calls.filter((c) => c[0].key.remoteJid === GROUP_JID_A)).toHaveLength(2);
+  });
+
+  it("stops paging once WhatsApp reports the end of history", async () => {
+    db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
+    const nowSec = Math.floor(Date.now() / 1000);
+    seedAnchor(GROUP_JID_A, nowSec);
+
+    // Lazy: batch() buffers into the store, which has to happen when the
+    // scraper calls, not when the mock is configured.
+    historyMock.mockImplementation(() =>
+      Promise.resolve(batch([makeMsg(GROUP_JID_A, nowSec - 100, "only", "o1")], true))
+    );
+
+    const { scraper } = buildScraper();
+    const result = await scraper.scrape(CONTACT_E164, { maxMessagesPerChat: 500 });
+
+    expect(result.chats.find((c) => c.jid === GROUP_JID_A)?.messagesBackfilled).toBe(1);
+    expect(historyMock.mock.calls.filter((c) => c[0].key.remoteJid === GROUP_JID_A)).toHaveLength(1);
   });
 
   it("respects the since floor to stop pagination early", async () => {
@@ -133,36 +222,33 @@ describe("Phase 13: Contact context scraper", () => {
 
     const cutoff = new Date("2026-03-01T00:00:00Z");
     const sinceSec = Math.floor(cutoff.getTime() / 1000);
+    seedAnchor(GROUP_JID_A, sinceSec + 100);
 
-    fetchMessageHistoryMock
-      .mockResolvedValueOnce({
-        messages: [
-          makeMsg(GROUP_JID_A, sinceSec + 100, "new", "n1"),
-          makeMsg(GROUP_JID_A, sinceSec - 100, "already too old", "n2"),
-        ],
-        cursor: "cur1",
-      });
+    historyMock.mockImplementationOnce(() =>
+      Promise.resolve(batch([makeMsg(GROUP_JID_A, sinceSec - 100, "already too old", "n2")]))
+    );
 
     const { scraper } = buildScraper();
     const result = await scraper.scrape(CONTACT_E164, { since: cutoff.toISOString() });
 
-    const a = result.chats.find((c) => c.jid === GROUP_JID_A);
-    expect(a?.messagesBackfilled).toBe(2);
-    expect(fetchMessageHistoryMock.mock.calls.filter((call) => call[0] === GROUP_JID_A)).toHaveLength(1);
+    expect(result.chats.find((c) => c.jid === GROUP_JID_A)?.messagesBackfilled).toBe(1);
+    // That batch pushed the anchor past the floor, so no second request goes out.
+    expect(historyMock.mock.calls.filter((c) => c[0].key.remoteJid === GROUP_JID_A)).toHaveLength(1);
   });
 
   it("returns zero messages gracefully when socket is null", async () => {
     db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
     const membership = new MembershipService(db, () => null);
-    const scraper = new ContactContextScraper(db, store, membership, () => null);
+    const scraper = new ContactContextScraper(db, store, membership, () => null, historyFetcher());
 
     const result = await scraper.scrape(CONTACT_E164);
     expect(result.totalMessagesBackfilled).toBe(0);
   });
 
-  it("handles fetchMessageHistory throwing without crashing", async () => {
+  it("handles a history request throwing without crashing the scrape", async () => {
     db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
-    fetchMessageHistoryMock.mockRejectedValue(new Error("boom"));
+    seedAnchor(GROUP_JID_A);
+    historyMock.mockRejectedValue(new Error("boom"));
 
     const { scraper } = buildScraper();
     const result = await scraper.scrape(CONTACT_E164);
@@ -189,10 +275,11 @@ describe("Phase 13: Contact context scraper", () => {
 
     it("POST /api/contacts/:identifier/scrape-context returns scrape result", async () => {
       db.upsertChatMember({ chatJid: GROUP_JID_A, participantJid: CONTACT_JID, displayName: null, lastVerifiedAt: Date.now() });
-      fetchMessageHistoryMock.mockResolvedValue({
-        messages: [makeMsg(GROUP_JID_A, Math.floor(Date.now() / 1000), "yo", "x1")],
-        cursor: null,
-      });
+      const nowSec = Math.floor(Date.now() / 1000);
+      seedAnchor(GROUP_JID_A, nowSec);
+      historyMock.mockImplementation(() =>
+        Promise.resolve(batch([makeMsg(GROUP_JID_A, nowSec - 100, "yo", "x1")], true))
+      );
 
       const { scraper } = buildScraper();
       const app = buildApp(scraper);
@@ -207,7 +294,6 @@ describe("Phase 13: Contact context scraper", () => {
     });
 
     it("POST without body still works (uses defaults)", async () => {
-      fetchMessageHistoryMock.mockResolvedValue({ messages: [], cursor: null });
       const { scraper } = buildScraper();
       const app = buildApp(scraper);
 

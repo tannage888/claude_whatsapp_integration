@@ -8,9 +8,12 @@ import { MembershipService } from "./services/membership.js";
 import { ContactContextScraper } from "./services/contact-context-scraper.js";
 import { ZipAutoDetector } from "./services/zip-auto-detector.js";
 import { KitClient } from "./services/kit-client.js";
+import { GapDetector } from "./services/gap-detector.js";
+import { SessionHealth } from "./services/session-health.js";
 import type { proto } from "@whiskeysockets/baileys";
 
 const VERSION = "0.1.0";
+const GAP_REVIEW_DEBOUNCE_MS = 5_000;
 
 async function main(): Promise<void> {
   const startedAt = Date.now();
@@ -22,6 +25,37 @@ async function main(): Promise<void> {
   const noRead = new NoReadService(db, wa.store);
   const membership = new MembershipService(db, () => wa.getSocket(), config.MEMBERSHIP_REFRESH_HOURS, wa.store);
   const contextScraper = new ContactContextScraper(db, wa.store, membership, () => wa.getSocket());
+  const gapDetector = new GapDetector(db, wa.store);
+
+  // A broken Signal session drops every message in a chat without raising
+  // anything, so record it as a gap — the same channel an offline daemon
+  // uses — and delete the session so the next message renegotiates.
+  const sessionHealth = new SessionHealth(config.AUTH_STATE_PATH, {
+    onBroken: (entry) => {
+      console.error(
+        `🔐 Session broken for ${entry.identity} (${entry.chatJid ?? "unknown chat"}) — ` +
+          `${entry.failures} undecryptable messages since ${new Date(entry.firstFailureAt).toISOString()}. Healing.`
+      );
+      db.recordGap({
+        chatJid: entry.chatJid,
+        fromTs: entry.firstFailureAt,
+        toTs: entry.lastFailureAt,
+        reason: "decrypt_failure",
+        backfillAttempted: false,
+        backfillSucceeded: false,
+      });
+    },
+  });
+
+  wa.on("message:undecryptable", ({ chatJid, senderJid }: { chatJid: string | null; senderJid: string | null }) => {
+    if (!chatJid) return;
+    sessionHealth.recordFailure(chatJid, senderJid);
+  });
+
+  wa.on("message:decrypted", ({ chatJid, senderJid }: { chatJid: string; senderJid: string | null }) => {
+    sessionHealth.recordSuccess(chatJid, senderJid);
+    gapDetector.touchChat(chatJid);
+  });
 
   // Kit gateway client — handles name→JID resolution (NameResolver fallback
   // when the daemon's chats table doesn't know the contact) and the
@@ -96,6 +130,48 @@ async function main(): Promise<void> {
 
   await wa.connect();
 
+  // Anything missed while the daemon was down is a gap. Record it now that the
+  // socket is live, rather than discovering the hole weeks later.
+  wa.once("connection:open", () => {
+    try {
+      const { gapsRecorded, alreadyCovered } = gapDetector.detect();
+      if (gapsRecorded > 0) {
+        console.log(`🕳️  Gaps detected: ${gapsRecorded} (${alreadyCovered} already covered)`);
+      }
+    } catch (e) {
+      console.error(`Gap detection failed: ${(e as Error).message}`);
+    }
+  });
+
+  // Reconnect history arrives in batches over the seconds after the socket
+  // opens; each one can close an open gap. Re-check on the trailing edge so a
+  // burst of batches costs one pass rather than one per batch.
+  let gapReviewTimer: ReturnType<typeof setTimeout> | null = null;
+  let historySyncComplete = false;
+  wa.on("history:set", ({ isLatest }: { count: number; isLatest: boolean }) => {
+    // isLatest marks the final batch: past it, a chat with nothing in its gap
+    // window was not missed, it was quiet. Sticky, because the batches after
+    // it (and later reconnects) are still worth reviewing.
+    if (isLatest) historySyncComplete = true;
+    if (gapReviewTimer) clearTimeout(gapReviewTimer);
+    gapReviewTimer = setTimeout(() => {
+      gapReviewTimer = null;
+      try {
+        const closed = gapDetector.reviewOpenGaps();
+        if (closed > 0) console.log(`🕳️  Gaps closed by history sync: ${closed}`);
+        // Order matters: reviewOpenGaps claims the gaps history covered, and
+        // whatever is still open after it is the silence.
+        if (historySyncComplete) {
+          const settled = gapDetector.settleQuietGaps();
+          if (settled > 0) console.log(`🕳️  Gaps closed as quiet (no evidence of missed traffic): ${settled}`);
+        }
+      } catch (e) {
+        console.error(`Gap review failed: ${(e as Error).message}`);
+      }
+    }, GAP_REVIEW_DEBOUNCE_MS);
+    gapReviewTimer.unref?.();
+  });
+
   // ── REST API ───────────────────────────────────────────────
 
   const app = express();
@@ -112,6 +188,7 @@ async function main(): Promise<void> {
     contextScraper,
     authStatePath: config.AUTH_STATE_PATH,
     kit,
+    sessionHealth,
   });
   app.use("/api", apiRouter);
 

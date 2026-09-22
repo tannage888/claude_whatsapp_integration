@@ -10,12 +10,25 @@ import { Boom } from "@hapi/boom";
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 import { EventEmitter } from "node:events";
-import { rmSync, existsSync, mkdirSync } from "node:fs";
+import { rmSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "../config.js";
 import { MessageStore } from "./message-store.js";
 import type { ConnectionStatus, WhatsAppMessage } from "../types.js";
 
 const logger = pino({ level: "silent" });
+
+/** Baileys multi-file auth artefacts. Anything else in the directory is data. */
+const AUTH_FILE_PREFIXES = [
+  "creds",
+  "app-state-sync-",
+  "pre-key-",
+  "session-",
+  "sender-key-",
+];
+
+/** proto.WebMessageInfo.StubType.CIPHERTEXT — an undecryptable message. */
+const CIPHERTEXT_STUB = 2;
 
 export class WhatsAppConnection extends EventEmitter {
   private socket: WASocket | null = null;
@@ -84,8 +97,12 @@ export class WhatsAppConnection extends EventEmitter {
       }
     });
 
-    this.socket.ev.on("messaging-history.set", ({ messages }) => {
+    this.socket.ev.on("messaging-history.set", ({ messages, isLatest }) => {
       this.store.buffer(messages);
+      // Reconnect history is what actually fills an offline gap, and it lands
+      // seconds after the socket opens. Announce it so gap coverage is judged
+      // against the messages that arrived, not the ones on disk at startup.
+      this.emit("history:set", { count: messages.length, isLatest: isLatest ?? false });
     });
 
     // Track whether we've already requested a pairing code for this session
@@ -154,8 +171,25 @@ export class WhatsAppConnection extends EventEmitter {
         // Emit raw proto for hooks that need more than the text-body parser (e.g. ZIP auto-detect)
         this.emit("message:raw", msg);
 
+        // A CIPHERTEXT stub is a message we received but could not decrypt.
+        // It has no body, so parseMessage discards it and the chat looks
+        // quiet rather than broken — announce it so session health can act.
+        if (msg.messageStubType === CIPHERTEXT_STUB) {
+          this.emit("message:undecryptable", {
+            chatJid: msg.key?.remoteJid ?? null,
+            senderJid: msg.key?.participant ?? msg.key?.remoteJid ?? null,
+          });
+          continue;
+        }
+
         const parsed = this.parseMessage(msg);
         if (!parsed) continue;
+        if (msg.key?.remoteJid) {
+          this.emit("message:decrypted", {
+            chatJid: msg.key.remoteJid,
+            senderJid: msg.key.participant ?? msg.key.remoteJid,
+          });
+        }
         this.emit(parsed.fromMe ? "message:sent" : "message:received", parsed);
       }
     });
@@ -180,9 +214,23 @@ export class WhatsAppConnection extends EventEmitter {
     this.setStatus("disconnected");
   }
 
+  /**
+   * Remove the Baileys credential and session files so the next connect
+   * re-pairs from scratch.
+   *
+   * Deliberately file-by-file rather than a recursive delete of the whole
+   * directory: the message store and state DB have lived inside the auth path
+   * before now, and wiping those alongside the credentials would throw away
+   * every captured message to fix a pairing problem.
+   */
   wipeAuthState(authStatePath: string): void {
     if (existsSync(authStatePath)) {
-      rmSync(authStatePath, { recursive: true, force: true });
+      for (const file of readdirSync(authStatePath)) {
+        if (!file.endsWith(".json")) continue;
+        if (!AUTH_FILE_PREFIXES.some((p) => file.startsWith(p))) continue;
+        rmSync(join(authStatePath, file), { force: true });
+      }
+    } else {
       mkdirSync(authStatePath, { recursive: true });
     }
     this.setStatus("disconnected");

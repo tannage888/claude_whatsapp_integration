@@ -131,6 +131,47 @@ describe("Phase 1: Auth + connection", () => {
     expect(wa.getStatus()).toBe("disconnected");
   });
 
+  it("wipeAuthState clears every credential and session file", async () => {
+    const authDir = path.join(tmpDir, "auth_state_full");
+    fs.mkdirSync(authDir, { recursive: true });
+    for (const f of [
+      "creds.json",
+      "app-state-sync-key-AAAAAFIF.json",
+      "app-state-sync-version-regular.json",
+      "pre-key-10.json",
+      "session-81995354882069.0.json",
+      "sender-key-123.json",
+    ]) {
+      fs.writeFileSync(path.join(authDir, f), "{}");
+    }
+
+    const WhatsAppConnection = await importWhatsApp();
+    const wa = new WhatsAppConnection(path.join(tmpDir, "store2.json"));
+    wa.wipeAuthState(authDir);
+
+    expect(fs.readdirSync(authDir)).toHaveLength(0);
+  });
+
+  it("wipeAuthState preserves captured data living beside the credentials", async () => {
+    // Re-pairing must never cost the message history. These paths have been
+    // configured inside auth_state before, so the guarantee is load-bearing.
+    const authDir = path.join(tmpDir, "auth_state_with_data");
+    fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(path.join(authDir, "creds.json"), "{}");
+    fs.writeFileSync(path.join(authDir, "session-81995354882069.0.json"), "{}");
+    fs.writeFileSync(path.join(authDir, "wa_store.json"), JSON.stringify({ messages: { a: [1] } }));
+    fs.writeFileSync(path.join(authDir, "state.db"), "sqlite");
+
+    const WhatsAppConnection = await importWhatsApp();
+    const wa = new WhatsAppConnection(path.join(tmpDir, "store3.json"));
+    wa.wipeAuthState(authDir);
+
+    expect(fs.existsSync(path.join(authDir, "creds.json"))).toBe(false);
+    expect(fs.existsSync(path.join(authDir, "session-81995354882069.0.json"))).toBe(false);
+    expect(fs.existsSync(path.join(authDir, "wa_store.json"))).toBe(true);
+    expect(fs.existsSync(path.join(authDir, "state.db"))).toBe(true);
+  });
+
   it("DELETE /api/auth wipes auth state via endpoint", async () => {
     const authDir = path.join(tmpDir, "auth_state");
     fs.mkdirSync(authDir, { recursive: true });
